@@ -1,0 +1,35 @@
+[package]
+name = "cartesi-coprocessor-solver"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+eigen-types = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "5e24a28e5f8de753e856ca4d11c9c63e3a08e315"}
+eigen-services-blsaggregation = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "5e24a28e5f8de753e856ca4d11c9c63e3a08e315"}
+eigen-services-avsregistry = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "5e24a28e5f8de753e856ca4d11c9c63e3a08e315"}
+eigen-client-avsregistry = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "5e24a28e5f8de753e856ca4d11c9c63e3a08e315"}
+eigen-crypto-bls = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "5e24a28e5f8de753e856ca4d11c9c63e3a08e315"}
+eigen-logging = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "5e24a28e5f8de753e856ca4d11c9c63e3a08e315"}
+eigen-utils = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "5e24a28e5f8de753e856ca4d11c9c63e3a08e315"}
+eigen-services-operatorsinfo = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "5e24a28e5f8de753e856ca4d11c9c63e3a08e315"}
+log = "0.4.22"
+ethers = "2.0.14"
+sha3 = "0.10.8"
+merkle = "1.11.0"
+hex = "0.4.3"
+ring = "0.17.8"
+async-std = { version = "1.12", features = ["attributes", "tokio1"] }
+tokio-util = "0.7.12"
+alloy-primitives = "0.8.8"
+alloy-provider = { version = "0.4.2", features = ["ws"]}
+hyper = { version = "0.14", features = ["full"] }
+alloy-contract = { version = "0.4.2", features = ["pubsub"]}
+alloy-rpc-types-eth = "0.4.2"
+futures-util = "0.3"
+alloy-sol-types = "0.8.8"
+serde_json = "1.0.107"
+ark-bn254 = "0.4.0"
+ark-serialize = "0.4.2"
+sha2 = "0.10.8"
+serde = { version = "1.0.203", features = ["derive"] }
+toml = "0.8.14"

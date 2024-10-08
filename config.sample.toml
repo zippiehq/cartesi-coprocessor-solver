@@ -1,0 +1,7 @@
+http_endpoint = ""
+ws_endpoint = ""
+registry_coordinator_address = "0x45cE5242DF4Cdd6CB925C6296732487D15216bc9"
+operator_state_retriever_address = "0x4fEcf2c85D2FB1E1A35906B737Cd90bb85c05E1C"
+current_first_block = 20669157
+task_issuer = "0xb51032037ee0FB6F2d09BE6Dbe44556bADF370A1"
+ruleset = "b51032037ee0FB6F2d09BE6Dbe44556bADF370A1"
