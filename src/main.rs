@@ -31,7 +31,6 @@ use hyper::{Client, Request};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
-use std::ops::Add;
 use std::sync::Arc;
 use std::time::Duration;
 use std::{collections::HashMap, convert::Infallible};
@@ -70,6 +69,8 @@ async fn main() {
         config.ws_endpoint.clone(),
     )
     .await;
+    let avs_registry_service =
+        AvsRegistryServiceChainCaller::new(avs_registry_reader, operators_info.clone());
 
     let cancellation_token = CancellationToken::new();
     let operators_info_clone = Arc::new(operators_info.clone());
@@ -99,17 +100,156 @@ async fn main() {
         current_last_block,
         config.registry_coordinator_address,
     );
-
+    let ruleset = config.ruleset.clone();
     let addr: SocketAddr = ([0, 0, 0, 0], 3034).into();
-    let service = make_service_fn(|_| async move {
-        Ok::<_, Infallible>(service_fn(move |_| async move {
-            let response = Response::builder()
-                .status(StatusCode::OK)
-                .body(Body::empty())
-                .unwrap();
+    let service = make_service_fn(|_| {
+        let avs_registry_service = avs_registry_service.clone();
+        let ws_endpoint = config.ws_endpoint.clone();
+        let sockets_map = sockets_map.clone();
+        let ruleset = ruleset.clone();
+        async move {
+            Ok::<_, Infallible>(service_fn(move |req| {
+                let avs_registry_service = avs_registry_service.clone();
+                let ws_endpoint = ws_endpoint.clone();
+                let sockets_map = sockets_map.clone();
+                let ruleset = ruleset.clone();
 
-            return Ok::<_, Infallible>(response);
-        }))
+                async move {
+                    let path = req.uri().path().to_owned();
+                    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+
+                    match (req.method().clone(), &segments as &[&str]) {
+                        (hyper::Method::POST, ["ensure", cid_str, machine_hash, size_str]) => {
+                            let ws_connect = alloy_provider::WsConnect::new(ws_endpoint);
+
+                            let ws_provider = alloy_provider::ProviderBuilder::new()
+                                .on_ws(ws_connect)
+                                .await
+                                .unwrap();
+                            let current_block_number =
+                                ws_provider.clone().get_block_number().await.unwrap();
+                            let quorum_nums = [0];
+
+                            match avs_registry_service
+                                .clone()
+                                .get_operators_avs_state_at_block(
+                                    current_block_number as u32,
+                                    &quorum_nums,
+                                )
+                                .await
+                            {
+                                Ok(operators) => {
+                                    let mut states_for_operators: HashMap<Vec<u8>, String> =
+                                        HashMap::new();
+                                    for operator in operators {
+                                        let operator_id = operator.1.operator_id;
+                                        let sockets_map = sockets_map.lock().await;
+                                        match sockets_map.get(&operator_id.to_vec()) {
+                                            Some(socket) => {
+                                                let request = Request::builder()
+                                                    .method("POST")
+                                                    .header("X-Ruleset", &ruleset)
+                                                    .uri(format!(
+                                                        "{}/ensure/{}/{}/{}",
+                                                        socket, cid_str, machine_hash, size_str
+                                                    ))
+                                                    .body(Body::empty())
+                                                    .unwrap();
+                                                println!(
+                                                    "{}/ensure/{}/{}/{}",
+                                                    socket, cid_str, machine_hash, size_str
+                                                );
+                                                let client = Client::new();
+                                                let response =
+                                                    client.request(request).await.unwrap();
+                                                let response_json =
+                                                    serde_json::from_slice::<serde_json::Value>(
+                                                        &hyper::body::to_bytes(response)
+                                                            .await
+                                                            .expect(
+                                                                format!(
+                                                                    "Error requesting {}/ensure/{}/{}/{}",
+                                                                    socket,
+                                                                    cid_str,
+                                                                    machine_hash,
+                                                                    size_str
+                                                                )
+                                                                .as_str(),
+                                                            )
+                                                            .to_vec(),
+                                                    )
+                                                    .unwrap();
+                                                match response_json.get("state") {
+                                                    Some(serde_json::Value::String(state)) => {
+                                                        states_for_operators.insert(
+                                                            operator_id.to_vec(),
+                                                            state.to_string(),
+                                                        );
+                                                    }
+                                                    _ => {
+                                                        panic!("No state found in request {}/ensure/{}/{}/{} response", socket,
+                                                        cid_str,
+                                                        machine_hash,
+                                                        size_str);
+                                                    }
+                                                };
+                                            }
+                                            None => {
+                                                let json_error = serde_json::json!({
+                                                    "error": format!("No socket for operator_id = {:?}", operator_id)
+                                                });
+                                                let json_error =
+                                                    serde_json::to_string(&json_error).unwrap();
+                                                let response = Response::builder()
+                                                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                                    .body(Body::from(json_error))
+                                                    .unwrap();
+
+                                                return Ok::<_, Infallible>(response);
+                                            }
+                                        }
+                                    }
+                                    let json_responses = serde_json::json!({
+                                        "operator_ids_with_states": states_for_operators,
+                                    });
+                                    let json_responses =
+                                        serde_json::to_string(&json_responses).unwrap();
+                                    let response = Response::builder()
+                                        .status(StatusCode::OK)
+                                        .body(Body::from(json_responses))
+                                        .unwrap();
+
+                                    return Ok::<_, Infallible>(response);
+                                }
+                                Err(err) => {
+                                    let json_error = serde_json::json!({
+                                        "error": format!("Failed to get operators: {:?}", err)
+                                    });
+                                    let json_error = serde_json::to_string(&json_error).unwrap();
+                                    let response = Response::builder()
+                                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                        .body(Body::from(json_error))
+                                        .unwrap();
+                                    return Ok::<_, Infallible>(response);
+                                }
+                            }
+                        }
+                        _ => {
+                            let json_error = serde_json::json!({
+                                "error": "unknown request",
+                            });
+                            let json_error = serde_json::to_string(&json_error).unwrap();
+                            let response = Response::builder()
+                                .status(StatusCode::BAD_REQUEST)
+                                .body(Body::from(json_error))
+                                .unwrap();
+
+                            return Ok::<_, Infallible>(response);
+                        }
+                    }
+                }
+            }))
+        }
     });
     let server = Server::bind(&addr).serve(Box::new(service));
     println!("Server is listening on {}", addr);
@@ -123,7 +263,7 @@ async fn main() {
         config.task_issuer,
         config.ruleset,
         current_block_num,
-        avs_registry_reader,
+        avs_registry_service.clone(),
     );
     subscribe_operator_socket_update(
         arc_ws_endpoint,
@@ -315,7 +455,6 @@ async fn handle_task_issued_operator(
         check_signatures_result._1
     );
 }
-
 fn subscribe_task_issued(
     sockets_map: Arc<Mutex<HashMap<Vec<u8>, String>>>,
     operators_info: OperatorInfoServiceInMemory,
@@ -324,7 +463,10 @@ fn subscribe_task_issued(
     task_issuer: Address,
     ruleset: String,
     current_block_num: u64,
-    avs_registry_reader: AvsRegistryChainReader,
+    avs_registry_service: AvsRegistryServiceChainCaller<
+        AvsRegistryChainReader,
+        OperatorInfoServiceInMemory,
+    >,
 ) {
     task::spawn({
         let sockets_map = Arc::clone(&sockets_map);
@@ -343,13 +485,11 @@ fn subscribe_task_issued(
 
             let subscription = event.subscribe().await.unwrap();
             let mut stream = subscription.into_stream();
-            let avs_registry_service =
-                AvsRegistryServiceChainCaller::new(avs_registry_reader.clone(), operators_info);
+
             let mut task_index: TaskIndex = 1;
             let quorum_nums = [0];
             let quorum_threshold_percentages = vec![100_u8];
             let time_to_expiry = Duration::from_secs(10);
-
             while let Ok((stream_event, _)) = stream.next().await.unwrap() {
                 println!("new TaskIssued {:?}", stream_event);
                 let current_block_number = ws_provider.clone().get_block_number().await.unwrap();
