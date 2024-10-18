@@ -378,7 +378,22 @@ async fn handle_task_issued_operator(
                 }
             };
 
-            println!("response_signature {:?}", response_signature);
+            let finish_callback: Vec<serde_json::Value> = match response_json.get("finish_callback")
+            {
+                Some(serde_json::Value::Array(finish_callback)) => {
+                    if finish_callback.len() == 2
+                        && finish_callback[0].is_number()
+                        && finish_callback[1].is_array()
+                    {
+                        finish_callback[1].as_array().unwrap().to_vec()
+                    } else {
+                        finish_callback.to_vec()
+                    }
+                }
+                _ => {
+                    panic!("No finish_callback found in request response");
+                }
+            };
 
             let signature_bytes = hex::decode(&response_signature).unwrap();
             println!("signature_bytes {:?}", signature_bytes);
@@ -394,6 +409,7 @@ async fn handle_task_issued_operator(
             let payload_keccak = hasher.finalize();
 
             task_response_buffer.extend_from_slice(&payload_keccak.to_vec());
+            task_response_buffer.extend_from_slice(&extract_number_array(finish_callback));
 
             let task_response_digest = Sha256::digest(&task_response_buffer);
             bls_agg_service
@@ -454,6 +470,20 @@ async fn handle_task_issued_operator(
         check_signatures_result._0.totalStakeForQuorum,
         check_signatures_result._1
     );
+}
+fn extract_number_array(values: Vec<serde_json::Value>) -> Vec<u8> {
+    let mut byte_vec = Vec::new();
+
+    for value in values {
+        match value {
+            serde_json::Value::Number(num) => {
+                byte_vec.push(num.as_u64().unwrap() as u8);
+            }
+            _ => {}
+        }
+    }
+
+    byte_vec
 }
 fn subscribe_task_issued(
     sockets_map: Arc<Mutex<HashMap<Vec<u8>, String>>>,
@@ -597,7 +627,7 @@ fn agg_response_to_non_signer_stakes_and_signature(
 sol!(
    interface ICoprocessor {
         #[derive(Debug)]
-        event TaskIssued(bytes32 machineHash, bytes32 lambdaHash, bytes input, address callback);
+        event TaskIssued(bytes32 machineHash, bytes input, address callback);
    }
 );
 
