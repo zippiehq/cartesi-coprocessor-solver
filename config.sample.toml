@@ -5,3 +5,4 @@ operator_state_retriever_address = "0x4fEcf2c85D2FB1E1A35906B737Cd90bb85c05E1C"
 current_first_block = 20669157
 task_issuer = "0xeEe3712f8104E312c1F16C79BbC6D653ab03662A"
 ruleset = "eEe3712f8104E312c1F16C79BbC6D653ab03662A"
+socket = "http://localhost:3033"

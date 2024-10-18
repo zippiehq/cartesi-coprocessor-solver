@@ -45,6 +45,7 @@ struct Config {
     current_first_block: u64,
     task_issuer: Address,
     ruleset: String,
+    socket: String,
 }
 #[async_std::main]
 async fn main() {
@@ -105,12 +106,16 @@ async fn main() {
     let service = make_service_fn(|_| {
         let avs_registry_service = avs_registry_service.clone();
         let ws_endpoint = config.ws_endpoint.clone();
+        let config_socket = config.socket.clone();
+
         let sockets_map = sockets_map.clone();
         let ruleset = ruleset.clone();
         async move {
             Ok::<_, Infallible>(service_fn(move |req| {
                 let avs_registry_service = avs_registry_service.clone();
                 let ws_endpoint = ws_endpoint.clone();
+                let config_socket = config_socket.clone();
+
                 let sockets_map = sockets_map.clone();
                 let ruleset = ruleset.clone();
 
@@ -145,7 +150,11 @@ async fn main() {
                                         let operator_id = operator.1.operator_id;
                                         let sockets_map = sockets_map.lock().await;
                                         match sockets_map.get(&operator_id.to_vec()) {
-                                            Some(socket) => {
+                                            Some(mut socket) => {
+                                                if socket == "Not Needed" {
+                                                    socket = &config_socket;
+                                                }
+
                                                 let request = Request::builder()
                                                     .method("POST")
                                                     .header("X-Ruleset", &ruleset)
@@ -259,7 +268,8 @@ async fn main() {
         sockets_map.clone(),
         operators_info,
         config.ws_endpoint.clone(),
-        config.http_endpoint,
+        config.http_endpoint.clone(),
+        config.socket.clone(),
         config.task_issuer,
         config.ruleset,
         current_block_num,
@@ -330,6 +340,7 @@ fn query_operator_socket_update(
 
 async fn handle_task_issued_operator(
     sockets_map: Arc<Mutex<HashMap<Vec<u8>, String>>>,
+    config_socket: String,
     operator: (FixedBytes<32>, OperatorAvsState),
     stream_event: TaskIssued,
     bls_agg_service: &BlsAggregatorService<
@@ -347,7 +358,11 @@ async fn handle_task_issued_operator(
     let operator_id = operator.1.operator_id;
     let sockets_map = sockets_map.lock().await;
     match sockets_map.get(&operator_id.to_vec()) {
-        Some(socket) => {
+        Some(mut socket) => {
+            if socket == "Not Needed" {
+                socket = &config_socket;
+            }
+
             let request = Request::builder()
                 .method("POST")
                 .header("X-Ruleset", &ruleset)
@@ -490,6 +505,7 @@ fn subscribe_task_issued(
     operators_info: OperatorInfoServiceInMemory,
     ws_endpoint: String,
     http_endpoint: String,
+    config_socket: String,
     task_issuer: Address,
     ruleset: String,
     current_block_num: u64,
@@ -534,6 +550,7 @@ fn subscribe_task_issued(
                         for operator in operators {
                             handle_task_issued_operator(
                                 sockets_map.clone(),
+                                config_socket.clone(),
                                 operator,
                                 stream_event.clone(),
                                 &bls_agg_service,
