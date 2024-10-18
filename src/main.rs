@@ -80,27 +80,26 @@ async fn main() {
         alloy_provider::ProviderBuilder::new().on_http(config.http_endpoint.parse().unwrap());
     let current_block_num = provider.get_block_number().await.unwrap();
     println!("current_block_num {:?}", current_block_num);
-    let mut current_first_block = config.current_first_block;
 
     task::spawn({
         let arc_operators_info = operators_info_clone.clone();
         async move {
             arc_operators_info
-                .start_service(&token_clone, current_first_block, current_block_num)
+                .start_service(&token_clone, config.current_first_block, current_block_num)
                 .await
                 .unwrap();
         }
     });
     let sockets_map: Arc<Mutex<HashMap<Vec<u8>, String>>> = Arc::new(Mutex::new(HashMap::new()));
-
-    let mut current_last_block = current_first_block;
+    let current_last_block = Arc::new(Mutex::new(config.current_first_block));
     let querying_thread = query_operator_socket_update(
         config.ws_endpoint.clone(),
         sockets_map.clone(),
-        current_first_block,
-        current_last_block,
+        config.current_first_block,
+        current_last_block.clone(),
         config.registry_coordinator_address,
     );
+
     let ruleset = config.ruleset.clone();
     let addr: SocketAddr = ([0, 0, 0, 0], 3034).into();
     let service = make_service_fn(|_| {
@@ -279,7 +278,7 @@ async fn main() {
         arc_ws_endpoint,
         sockets_map.clone(),
         config.registry_coordinator_address,
-        current_last_block,
+        current_last_block.clone(),
     );
     server.await.unwrap();
 }
@@ -287,12 +286,13 @@ async fn main() {
 fn query_operator_socket_update(
     ws_endpoint: String,
     sockets_map: Arc<Mutex<HashMap<Vec<u8>, String>>>,
-    mut current_first_block: u64,
-    mut current_last_block: u64,
+    current_first_block: u64,
+    current_last_block: Arc<Mutex<u64>>,
     registry_coordinator_address: Address,
 ) -> JoinHandle<()> {
     task::spawn({
         let sockets_map = Arc::clone(&sockets_map);
+        let current_last_block = Arc::clone(&current_last_block);
         async move {
             let ws_connect = alloy_provider::WsConnect::new(ws_endpoint);
             let ws_provider = alloy_provider::ProviderBuilder::new()
@@ -301,8 +301,11 @@ fn query_operator_socket_update(
                 .unwrap();
 
             let last_block = ws_provider.clone().get_block_number().await.unwrap();
+            let mut current_last_block = current_last_block.lock().await;
+            let mut current_first_block = current_first_block;
+
             while current_first_block <= last_block {
-                current_last_block = if current_first_block + 10000 < last_block {
+                *current_last_block = if current_first_block + 10000 < last_block {
                     current_first_block + 10000
                 } else {
                     last_block
@@ -310,8 +313,8 @@ fn query_operator_socket_update(
 
                 let event_filter = Filter::new()
                     .address(registry_coordinator_address)
-                    .from_block(current_first_block)
-                    .to_block(current_last_block)
+                    .from_block(current_first_block.clone())
+                    .to_block(current_last_block.clone())
                     .event("OperatorSocketUpdate(bytes32,string)");
 
                 let event: Event<_, _, ISocketUpdater::OperatorSocketUpdate, _> =
@@ -329,10 +332,10 @@ fn query_operator_socket_update(
                         operator_socket_update.socket,
                     );
                 }
-                if current_first_block == current_last_block {
+                if current_first_block == *current_last_block {
                     break;
                 }
-                current_first_block = current_last_block + 1;
+                current_first_block = current_last_block.clone() + 1;
             }
         }
     })
@@ -346,7 +349,7 @@ async fn handle_task_issued_operator(
     bls_agg_service: &BlsAggregatorService<
         AvsRegistryServiceChainCaller<AvsRegistryChainReader, OperatorInfoServiceInMemory>,
     >,
-    mut task_index: TaskIndex,
+    task_index: Arc<Mutex<TaskIndex>>,
     time_to_expiry: Duration,
     ruleset: String,
     task_issuer: Address,
@@ -425,11 +428,11 @@ async fn handle_task_issued_operator(
 
             task_response_buffer.extend_from_slice(&payload_keccak.to_vec());
             task_response_buffer.extend_from_slice(&extract_number_array(finish_callback));
-
+            let mut task_index = task_index.lock().await;
             let task_response_digest = Sha256::digest(&task_response_buffer);
             bls_agg_service
                 .initialize_new_task(
-                    task_index,
+                    *task_index,
                     current_block_num as u32,
                     quorum_nums.clone(),
                     quorum_threshold_percentages.clone(),
@@ -440,14 +443,14 @@ async fn handle_task_issued_operator(
 
             bls_agg_service
                 .process_new_signature(
-                    task_index,
+                    *task_index,
                     B256::from_slice(task_response_digest.as_slice()),
                     Signature::new(g1),
                     operator_id.into(),
                 )
                 .await
                 .unwrap();
-            task_index = task_index + 1;
+            *task_index = *task_index + 1;
         }
         None => {
             eprint!("No socket for operator_id {:?}", hex::encode(operator_id));
@@ -519,7 +522,6 @@ fn subscribe_task_issued(
         async move {
             operators_info.past_querying_finished.notified().await;
             println!("Started TaskIssued subscription");
-
             let ws_connect = alloy_provider::WsConnect::new(ws_endpoint);
             let ws_provider = alloy_provider::ProviderBuilder::new()
                 .on_ws(ws_connect)
@@ -531,8 +533,7 @@ fn subscribe_task_issued(
 
             let subscription = event.subscribe().await.unwrap();
             let mut stream = subscription.into_stream();
-
-            let mut task_index: TaskIndex = 1;
+            let task_index = Arc::new(Mutex::new(1));
             let quorum_nums = [0];
             let quorum_threshold_percentages = vec![100_u8];
             let time_to_expiry = Duration::from_secs(10);
@@ -554,7 +555,7 @@ fn subscribe_task_issued(
                                 operator,
                                 stream_event.clone(),
                                 &bls_agg_service,
-                                task_index,
+                                task_index.clone(),
                                 time_to_expiry,
                                 ruleset.clone(),
                                 task_issuer,
@@ -580,7 +581,7 @@ fn subscribe_operator_socket_update(
     arc_ws_endpoint: Arc<String>,
     sockets_map: Arc<Mutex<HashMap<Vec<u8>, String>>>,
     registry_coordinator_address: Address,
-    current_last_block: u64,
+    current_last_block: Arc<Mutex<u64>>,
 ) {
     task::spawn({
         println!("Started OperatorSocketUpdate subscription");
@@ -597,7 +598,7 @@ fn subscribe_operator_socket_update(
             let event_filter = Filter::new()
                 .address(registry_coordinator_address)
                 .event("OperatorSocketUpdate(bytes32,string)")
-                .from_block(current_last_block);
+                .from_block(*current_last_block.lock().await);
 
             let event: Event<_, _, ISocketUpdater::OperatorSocketUpdate, _> =
                 Event::new(ws_provider, event_filter);
