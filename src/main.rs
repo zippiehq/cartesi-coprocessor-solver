@@ -49,8 +49,10 @@ struct Config {
 }
 #[async_std::main]
 async fn main() {
-    let config_string = std::fs::read_to_string("config.sample.toml").unwrap();
+    let config_string = std::fs::read_to_string("config.toml").unwrap();
     let config: Config = toml::from_str(&config_string).unwrap();
+    
+    println!("Starting solver..");
     let arc_ws_endpoint = Arc::new(config.ws_endpoint.clone());
 
     let tracing_logger =
@@ -241,6 +243,11 @@ async fn main() {
                                     return Ok::<_, Infallible>(response);
                                 }
                             }
+                        }
+                        (hyper::Method::GET, ["health"]) => {
+                            let json_request = r#"{"healthy": "true"}"#;
+                            let response = Response::new(Body::from(json_request));
+                            return Ok::<_, Infallible>(response);
                         }
                         _ => {
                             let json_error = serde_json::json!({
