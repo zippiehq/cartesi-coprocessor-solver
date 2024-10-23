@@ -4,38 +4,38 @@ use alloy_provider::Provider;
 use alloy_rpc_types_eth::Filter;
 use alloy_sol_types::sol;
 use ark_serialize::CanonicalDeserialize;
-use async_std::sync::Mutex;
-use async_std::{task, task::JoinHandle};
+use async_std::{sync::Mutex, task, task::JoinHandle};
 use eigen_client_avsregistry::reader::AvsRegistryChainReader;
 use eigen_crypto_bls::{
     convert_to_bls_checker_g1_point, convert_to_bls_checker_g2_point, Signature,
 };
 use eigen_logging::{log_level::LogLevel, tracing_logger::TracingLogger};
-use eigen_services_avsregistry::chaincaller::AvsRegistryServiceChainCaller;
-use eigen_services_avsregistry::AvsRegistryService;
-use eigen_services_blsaggregation::bls_agg::BlsAggregationServiceResponse;
-use eigen_services_blsaggregation::bls_agg::BlsAggregatorService;
+use eigen_services_avsregistry::{chaincaller::AvsRegistryServiceChainCaller, AvsRegistryService};
+use eigen_services_blsaggregation::bls_agg::{BlsAggregationServiceResponse, BlsAggregatorService};
 use eigen_services_operatorsinfo::operatorsinfo_inmemory::OperatorInfoServiceInMemory;
-use eigen_types::avs::TaskIndex;
 use eigen_types::operator::OperatorAvsState;
-use eigen_utils::get_provider;
-use eigen_utils::iblssignaturechecker::{
-    IBLSSignatureChecker, IBLSSignatureChecker::NonSignerStakesAndSignature, BN254::G1Point,
+use eigen_utils::{
+    get_provider,
+    iblssignaturechecker::{
+        IBLSSignatureChecker::{self, NonSignerStakesAndSignature},
+        BN254::G1Point,
+    },
 };
 use futures_util::StreamExt;
+use hex::FromHex;
 use hyper::{
     service::{make_service_fn, service_fn},
-    Body, Response, Server, StatusCode,
+    Body, Client, Request, Response, Server, StatusCode,
 };
-use hyper::{Client, Request};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::Duration;
-use std::{collections::HashMap, convert::Infallible};
+use std::{collections::HashMap, convert::Infallible, net::SocketAddr, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 use ICoprocessor::TaskIssued;
+mod outputs_merkle;
+const HEIGHT: usize = 63;
+const TASK_INDEX: u32 = 1;
+
 #[derive(Deserialize)]
 struct Config {
     http_endpoint: String,
@@ -123,6 +123,95 @@ async fn main() {
                     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
                     match (req.method().clone(), &segments as &[&str]) {
+                        (hyper::Method::POST, ["issue_task", machine_hash, callback]) => {
+                            let input = hyper::body::to_bytes(req.into_body())
+                                .await
+                                .unwrap()
+                                .to_vec();
+                            let ws_connect = alloy_provider::WsConnect::new(ws_endpoint);
+
+                            let ws_provider = alloy_provider::ProviderBuilder::new()
+                                .on_ws(ws_connect)
+                                .await
+                                .unwrap();
+
+                            let current_block_number =
+                                ws_provider.clone().get_block_number().await.unwrap();
+                            let quorum_nums = [0];
+                            let quorum_threshold_percentages = vec![100_u8];
+                            let time_to_expiry = Duration::from_secs(10);
+
+                            match avs_registry_service
+                                .clone()
+                                .get_operators_avs_state_at_block(
+                                    current_block_number as u32,
+                                    &quorum_nums,
+                                )
+                                .await
+                            {
+                                Ok(operators) => {
+                                    let task_issued = TaskIssued {
+                                        machineHash: B256::from_hex(&machine_hash).unwrap(),
+                                        input: input.into(),
+                                        callback: Address::parse_checksummed(callback, None)
+                                            .expect("valid checksum"),
+                                    };
+                                    let bls_agg_response = handle_task_issued_operator(
+                                        operators,
+                                        true,
+                                        sockets_map.clone(),
+                                        config_socket.clone(),
+                                        task_issued.clone(),
+                                        avs_registry_service.clone(),
+                                        time_to_expiry,
+                                        ruleset.clone(),
+                                        current_block_num,
+                                        quorum_nums.to_vec(),
+                                        quorum_threshold_percentages.clone(),
+                                    )
+                                    .await;
+                                    match bls_agg_response {
+                                        Ok(service_response) => {
+                                            let json_responses = serde_json::json!({
+                                                "service_response": service_response,
+                                            });
+                                            let json_responses =
+                                                serde_json::to_string(&json_responses).unwrap();
+                                            let response = Response::builder()
+                                                .status(StatusCode::OK)
+                                                .body(Body::from(json_responses))
+                                                .unwrap();
+
+                                            return Ok::<_, Infallible>(response);
+                                        }
+                                        Err(err) => {
+                                            //handles the case when proofs weren't proved successfully
+                                            let json_error = serde_json::json!({
+                                                "error": err.to_string()
+                                            });
+                                            let json_error =
+                                                serde_json::to_string(&json_error).unwrap();
+                                            let response = Response::builder()
+                                                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                                .body(Body::from(json_error))
+                                                .unwrap();
+                                            return Ok::<_, Infallible>(response);
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    let json_error = serde_json::json!({
+                                        "error": format!("Failed to get operators: {:?}", err)
+                                    });
+                                    let json_error = serde_json::to_string(&json_error).unwrap();
+                                    let response = Response::builder()
+                                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                        .body(Body::from(json_error))
+                                        .unwrap();
+                                    return Ok::<_, Infallible>(response);
+                                }
+                            }
+                        }
                         (hyper::Method::POST, ["ensure", cid_str, machine_hash, size_str]) => {
                             let ws_connect = alloy_provider::WsConnect::new(ws_endpoint);
 
@@ -342,124 +431,160 @@ fn query_operator_socket_update(
 }
 
 async fn handle_task_issued_operator(
+    operators: HashMap<FixedBytes<32>, OperatorAvsState>,
+    generate_proofs: bool,
     sockets_map: Arc<Mutex<HashMap<Vec<u8>, String>>>,
     config_socket: String,
-    operator: (FixedBytes<32>, OperatorAvsState),
     stream_event: TaskIssued,
-    bls_agg_service: &BlsAggregatorService<
-        AvsRegistryServiceChainCaller<AvsRegistryChainReader, OperatorInfoServiceInMemory>,
+    avs_registry_service: AvsRegistryServiceChainCaller<
+        AvsRegistryChainReader,
+        OperatorInfoServiceInMemory,
     >,
-    task_index: Arc<Mutex<TaskIndex>>,
     time_to_expiry: Duration,
     ruleset: String,
-    task_issuer: Address,
-    http_endpoint: String,
     current_block_num: u64,
     quorum_nums: Vec<u8>,
     quorum_threshold_percentages: Vec<u8>,
-) {
-    let operator_id = operator.1.operator_id;
-    let sockets_map = sockets_map.lock().await;
-    match sockets_map.get(&operator_id.to_vec()) {
-        Some(mut socket) => {
-            if socket == "Not Needed" {
-                socket = &config_socket;
-            }
-
-            let request = Request::builder()
-                .method("POST")
-                .header("X-Ruleset", &ruleset)
-                .uri(format!("{}/classic/{:x}", socket, stream_event.machineHash))
-                .body(Body::from(stream_event.input.to_vec()))
-                .unwrap();
-            println!("{}/classic/{:x}", socket, stream_event.machineHash);
-            let client = Client::new();
-            let response = client.request(request).await.unwrap();
-            let response_json = serde_json::from_slice::<serde_json::Value>(
-                &hyper::body::to_bytes(response)
-                    .await
-                    .expect(
-                        format!(
-                            "No respose for {}/classic/{:x}",
-                            socket, stream_event.machineHash,
-                        )
-                        .as_str(),
-                    )
-                    .to_vec(),
-            )
-            .unwrap();
-
-            let response_signature: String = match response_json.get("signature") {
-                Some(serde_json::Value::String(sign)) => sign.to_string(),
-                _ => {
-                    panic!("No signature found in request response");
+) -> Result<
+    (
+        BlsAggregationServiceResponse,
+        HashMap<alloy_primitives::FixedBytes<32>, Vec<(u16, Vec<u8>)>>,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let mut bls_agg_service = BlsAggregatorService::new(avs_registry_service.clone());
+    let mut response_digest_map = HashMap::new();
+    for operator in operators {
+        bls_agg_service = BlsAggregatorService::new(avs_registry_service.clone());
+        let operator_id = operator.1.operator_id;
+        let sockets_map = sockets_map.lock().await;
+        match sockets_map.get(&operator_id.to_vec()) {
+            Some(mut socket) => {
+                if socket == "Not Needed" {
+                    socket = &config_socket;
                 }
-            };
 
-            let finish_callback: Vec<serde_json::Value> = match response_json.get("finish_callback")
-            {
-                Some(serde_json::Value::Array(finish_callback)) => {
-                    if finish_callback.len() == 2
-                        && finish_callback[0].is_number()
-                        && finish_callback[1].is_array()
-                    {
-                        finish_callback[1].as_array().unwrap().to_vec()
-                    } else {
-                        finish_callback.to_vec()
+                let request = Request::builder()
+                    .method("POST")
+                    .header("X-Ruleset", &ruleset)
+                    .uri(format!("{}/classic/{:x}", socket, stream_event.machineHash))
+                    .body(Body::from(stream_event.input.to_vec()))
+                    .unwrap();
+                println!("{}/classic/{:x}", socket, stream_event.machineHash);
+                let client = Client::new();
+                let response = client.request(request).await.unwrap();
+                let response_json = serde_json::from_slice::<serde_json::Value>(
+                    &hyper::body::to_bytes(response)
+                        .await
+                        .expect(
+                            format!(
+                                "No respose for {}/classic/{:x}",
+                                socket, stream_event.machineHash,
+                            )
+                            .as_str(),
+                        )
+                        .to_vec(),
+                )
+                .unwrap();
+
+                let response_signature: String = match response_json.get("signature") {
+                    Some(serde_json::Value::String(sign)) => sign.to_string(),
+                    _ => {
+                        panic!("No signature found in request response");
+                    }
+                };
+
+                let finish_callback: Vec<serde_json::Value> =
+                    match response_json.get("finish_callback") {
+                        Some(serde_json::Value::Array(finish_callback)) => {
+                            if finish_callback.len() == 2
+                                && finish_callback[0].is_number()
+                                && finish_callback[1].is_array()
+                            {
+                                finish_callback[1].as_array().unwrap().to_vec()
+                            } else {
+                                finish_callback.to_vec()
+                            }
+                        }
+                        _ => {
+                            panic!("No finish_callback found in request response");
+                        }
+                    };
+                let finish_result = extract_number_array(finish_callback);
+                let outputs_vector: Vec<(u16, Vec<u8>)> =
+                    match response_json.get("outputs_callback_vector") {
+                        Some(outputs_callback) => {
+                            serde_json::from_value(outputs_callback.clone()).unwrap()
+                        }
+                        _ => {
+                            panic!("No outputs_callback_vector found in request response");
+                        }
+                    };
+                if generate_proofs {
+                    let mut keccak_outputs = Vec::new();
+
+                    for output in outputs_vector.clone() {
+                        let mut hasher = Keccak256::new();
+                        hasher.update(output.1.clone());
+                        let output_keccak = B256::from(hasher.finalize());
+                        keccak_outputs.push(output_keccak);
+                    }
+
+                    let proofs = outputs_merkle::create_proofs(keccak_outputs, HEIGHT).unwrap();
+
+                    if proofs.0.to_vec() != finish_result {
+                        return Err(format!("Outputs weren't proven successfully").into());
                     }
                 }
-                _ => {
-                    panic!("No finish_callback found in request response");
-                }
-            };
 
-            let signature_bytes = hex::decode(&response_signature).unwrap();
-            println!("signature_bytes {:?}", signature_bytes);
-            let g1: ark_bn254::g1::G1Affine =
-                ark_bn254::g1::G1Affine::deserialize_uncompressed(&signature_bytes[..]).unwrap();
+                let signature_bytes = hex::decode(&response_signature).unwrap();
+                println!("signature_bytes {:?}", signature_bytes);
+                let g1: ark_bn254::g1::G1Affine =
+                    ark_bn254::g1::G1Affine::deserialize_uncompressed(&signature_bytes[..])
+                        .unwrap();
 
-            let mut task_response_buffer = vec![0u8; 12];
-            task_response_buffer.extend_from_slice(&hex::decode(&ruleset).unwrap());
-            task_response_buffer.extend_from_slice(&stream_event.machineHash.to_vec());
+                let mut task_response_buffer = vec![0u8; 12];
+                task_response_buffer.extend_from_slice(&hex::decode(&ruleset).unwrap());
+                task_response_buffer.extend_from_slice(&stream_event.machineHash.to_vec());
 
-            let mut hasher = Keccak256::new();
-            hasher.update(&stream_event.input);
-            let payload_keccak = hasher.finalize();
+                let mut hasher = Keccak256::new();
+                hasher.update(&stream_event.input.clone());
+                let payload_keccak = hasher.finalize();
 
-            task_response_buffer.extend_from_slice(&payload_keccak.to_vec());
-            task_response_buffer.extend_from_slice(&extract_number_array(finish_callback));
-            let mut task_index = task_index.lock().await;
-            let task_response_digest = Sha256::digest(&task_response_buffer);
-            bls_agg_service
-                .initialize_new_task(
-                    *task_index,
-                    current_block_num as u32,
-                    quorum_nums.clone(),
-                    quorum_threshold_percentages.clone(),
-                    time_to_expiry,
-                )
-                .await
-                .unwrap();
+                task_response_buffer.extend_from_slice(&payload_keccak.to_vec());
+                task_response_buffer.extend_from_slice(&finish_result);
+                let task_response_digest = Sha256::digest(&task_response_buffer);
+                bls_agg_service
+                    .initialize_new_task(
+                        TASK_INDEX,
+                        current_block_num as u32,
+                        quorum_nums.clone(),
+                        quorum_threshold_percentages.clone(),
+                        time_to_expiry,
+                    )
+                    .await
+                    .unwrap();
 
-            bls_agg_service
-                .process_new_signature(
-                    *task_index,
+                bls_agg_service
+                    .process_new_signature(
+                        TASK_INDEX,
+                        B256::from_slice(task_response_digest.as_slice()),
+                        Signature::new(g1),
+                        operator_id.into(),
+                    )
+                    .await
+                    .unwrap();
+
+                response_digest_map.insert(
                     B256::from_slice(task_response_digest.as_slice()),
-                    Signature::new(g1),
-                    operator_id.into(),
-                )
-                .await
-                .unwrap();
-            *task_index = *task_index + 1;
-        }
-        None => {
-            eprint!("No socket for operator_id {:?}", hex::encode(operator_id));
+                    outputs_vector.clone(),
+                );
+            }
+            None => {
+                eprint!("No socket for operator_id {:?}", hex::encode(operator_id));
+            }
         }
     }
-
-    let root_provider = get_provider(http_endpoint.as_str());
-
-    let service_manager = IBLSSignatureChecker::new(task_issuer, root_provider);
     let bls_agg_response = bls_agg_service
         .aggregated_response_receiver
         .lock()
@@ -472,22 +597,7 @@ async fn handle_task_issued_operator(
         "agg_response_to_non_signer_stakes_and_signature {:?}",
         bls_agg_response
     );
-    let check_signatures_result = service_manager
-        .checkSignatures(
-            bls_agg_response.task_response_digest,
-            alloy_primitives::Bytes::from(quorum_nums.clone()),
-            current_block_num as u32,
-            agg_response_to_non_signer_stakes_and_signature(bls_agg_response),
-        )
-        .call()
-        .await
-        .unwrap();
-    println!(
-        "check_signatures_result {:?} {:?} {:?}",
-        check_signatures_result._0.signedStakeForQuorum,
-        check_signatures_result._0.totalStakeForQuorum,
-        check_signatures_result._1
-    );
+    Ok((bls_agg_response, response_digest_map))
 }
 fn extract_number_array(values: Vec<serde_json::Value>) -> Vec<u8> {
     let mut byte_vec = Vec::new();
@@ -533,7 +643,6 @@ fn subscribe_task_issued(
 
             let subscription = event.subscribe().await.unwrap();
             let mut stream = subscription.into_stream();
-            let task_index = Arc::new(Mutex::new(1));
             let quorum_nums = [0];
             let quorum_threshold_percentages = vec![100_u8];
             let time_to_expiry = Duration::from_secs(10);
@@ -546,26 +655,40 @@ fn subscribe_task_issued(
                     .await
                 {
                     Ok(operators) => {
-                        let bls_agg_service =
-                            BlsAggregatorService::new(avs_registry_service.clone());
-                        for operator in operators {
-                            handle_task_issued_operator(
-                                sockets_map.clone(),
-                                config_socket.clone(),
-                                operator,
-                                stream_event.clone(),
-                                &bls_agg_service,
-                                task_index.clone(),
-                                time_to_expiry,
-                                ruleset.clone(),
-                                task_issuer,
-                                http_endpoint.clone(),
-                                current_block_num,
-                                quorum_nums.to_vec(),
-                                quorum_threshold_percentages.clone(),
+                        let bls_agg_response = handle_task_issued_operator(
+                            operators,
+                            false,
+                            sockets_map.clone(),
+                            config_socket.clone(),
+                            stream_event.clone(),
+                            avs_registry_service.clone(),
+                            time_to_expiry,
+                            ruleset.clone(),
+                            current_block_num,
+                            quorum_nums.to_vec(),
+                            quorum_threshold_percentages.clone(),
+                        )
+                        .await
+                        .unwrap();
+                        let root_provider = get_provider(http_endpoint.as_str());
+
+                        let service_manager = IBLSSignatureChecker::new(task_issuer, root_provider);
+                        let check_signatures_result = service_manager
+                            .checkSignatures(
+                                bls_agg_response.0.task_response_digest,
+                                alloy_primitives::Bytes::from(quorum_nums.clone()),
+                                current_block_num as u32,
+                                agg_response_to_non_signer_stakes_and_signature(bls_agg_response.0),
                             )
-                            .await;
-                        }
+                            .call()
+                            .await
+                            .unwrap();
+                        println!(
+                            "check_signatures_result {:?} {:?} {:?}",
+                            check_signatures_result._0.signedStakeForQuorum,
+                            check_signatures_result._0.totalStakeForQuorum,
+                            check_signatures_result._1
+                        );
                     }
                     Err(e) => println!(
                         "no operators found at block {:?}. Error {:?}",
@@ -641,7 +764,6 @@ fn agg_response_to_non_signer_stakes_and_signature(
         nonSignerStakeIndices: agg_response.non_signer_stake_indices,
     }
 }
-
 sol!(
    interface ICoprocessor {
         #[derive(Debug)]
