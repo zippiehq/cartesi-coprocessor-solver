@@ -1,7 +1,9 @@
+use alloy::signers::k256::SecretKey;
 use alloy_contract::Event;
 use alloy_primitives::{Address, FixedBytes, Keccak256, B256};
-use alloy_provider::Provider;
+use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types_eth::Filter;
+use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::sol;
 use ark_serialize::CanonicalDeserialize;
 use async_std::{sync::Mutex, task, task::JoinHandle};
@@ -33,6 +35,7 @@ use std::{collections::HashMap, convert::Infallible, net::SocketAddr, sync::Arc,
 use tokio_util::sync::CancellationToken;
 use ICoprocessor::TaskIssued;
 mod outputs_merkle;
+use alloy_network::EthereumWallet;
 const HEIGHT: usize = 63;
 const TASK_INDEX: u32 = 1;
 
@@ -670,6 +673,57 @@ fn subscribe_task_issued(
                         )
                         .await
                         .unwrap();
+
+                        let secret_key = SecretKey::from_slice(
+                            &hex::decode(std::env::var("SECRET_KEY").unwrap()).unwrap(),
+                        )
+                        .unwrap();
+                        let signer = PrivateKeySigner::from(secret_key);
+                        let wallet = EthereumWallet::from(signer);
+                        let provider = ProviderBuilder::new()
+                            .with_recommended_fillers()
+                            .on_builtin(&http_endpoint)
+                            .await
+                            .unwrap();
+                        let contract = ResponseCallbackContract::new(task_issuer, &provider);
+
+                        let non_signer_stakes_and_signature_response =
+                            agg_response_to_non_signer_stakes_and_signature(
+                                bls_agg_response.0.clone(),
+                            );
+
+                        let outputs: Vec<alloy_primitives::Bytes> = bls_agg_response
+                            .1
+                            .get(&bls_agg_response.0.task_response_digest)
+                            .unwrap()
+                            .iter()
+                            .map(|bytes| bytes.clone().1.into())
+                            .collect();
+                        let call_builder = contract.callback(
+                            ResponseSol {
+                                ruleSet: Address::parse_checksummed(ruleset.clone(), None).unwrap(),
+                                machineHash: stream_event.machineHash,
+                                payloadHash: B256::from_slice(&stream_event.input),
+                                outputMerkle: outputs_merkle::create_proofs(
+                                    outputs
+                                        .iter()
+                                        .map(|element| B256::from_slice(&element.0))
+                                        .collect(),
+                                    HEIGHT,
+                                )
+                                .unwrap()
+                                .0,
+                            },
+                            quorum_nums.into(),
+                            100,
+                            0,
+                            current_block_num as u32,
+                            non_signer_stakes_and_signature_response.clone().into(),
+                            stream_event.callback,
+                            outputs,
+                        );
+                        let pending_tx = call_builder.send().await.unwrap();
+
                         let root_provider = get_provider(http_endpoint.as_str());
 
                         let service_manager = IBLSSignatureChecker::new(task_issuer, root_provider);
@@ -678,7 +732,7 @@ fn subscribe_task_issued(
                                 bls_agg_response.0.task_response_digest,
                                 alloy_primitives::Bytes::from(quorum_nums.clone()),
                                 current_block_num as u32,
-                                agg_response_to_non_signer_stakes_and_signature(bls_agg_response.0),
+                                non_signer_stakes_and_signature_response,
                             )
                             .call()
                             .await
@@ -738,6 +792,43 @@ fn subscribe_operator_socket_update(
     });
 }
 
+impl Into<NonSignerStakesAndSignatureSol> for NonSignerStakesAndSignature {
+    fn into(self) -> NonSignerStakesAndSignatureSol {
+        let apk_g2 = G2PointSol {
+            X: self.apkG2.X,
+            Y: self.apkG2.Y,
+        };
+        let sigma = G1PointSol {
+            X: self.sigma.X,
+            Y: self.sigma.Y,
+        };
+        NonSignerStakesAndSignatureSol {
+            nonSignerPubkeys: self
+                .nonSignerPubkeys
+                .iter()
+                .map(|g1_point| G1PointSol {
+                    X: g1_point.X,
+                    Y: g1_point.Y,
+                })
+                .collect(),
+            quorumApks: self
+                .quorumApks
+                .iter()
+                .map(|g1_point| G1PointSol {
+                    X: g1_point.X,
+                    Y: g1_point.Y,
+                })
+                .collect(),
+            apkG2: apk_g2,
+            sigma,
+            nonSignerQuorumBitmapIndices: self.nonSignerQuorumBitmapIndices,
+            quorumApkIndices: self.quorumApkIndices,
+            totalStakeIndices: self.totalStakeIndices,
+            nonSignerStakeIndices: self.nonSignerStakeIndices,
+        }
+    }
+}
+
 fn agg_response_to_non_signer_stakes_and_signature(
     agg_response: BlsAggregationServiceResponse,
 ) -> NonSignerStakesAndSignature {
@@ -778,3 +869,49 @@ sol!(
         event OperatorSocketUpdate(bytes32 indexed operatorId, string socket);
     }
 );
+sol! {
+    #[derive(Debug, Default)]
+    struct ResponseSol {
+        address ruleSet;
+        bytes32 machineHash;
+        bytes32 payloadHash;
+        bytes32 outputMerkle;
+    }
+    #[derive(Debug)]
+        struct G1PointSol {
+            uint256 X;
+            uint256 Y;
+        }
+        #[derive(Debug)]
+        struct G2PointSol {
+            uint256[2] X;
+            uint256[2] Y;
+        }
+    #[derive(Debug)]
+    struct NonSignerStakesAndSignatureSol {
+        uint32[] nonSignerQuorumBitmapIndices;
+        G1PointSol[] nonSignerPubkeys;
+        G1PointSol[] quorumApks;
+        G2PointSol apkG2;
+        G1PointSol sigma;
+        uint32[] quorumApkIndices;
+        uint32[] totalStakeIndices;
+        uint32[][] nonSignerStakeIndices;
+     }
+    #[sol(rpc)]
+    contract ResponseCallbackContract {
+        constructor(address) {}
+
+        #[derive(Debug)]
+        function callback(
+            ResponseSol calldata resp,
+            bytes calldata quorumNumbers,
+            uint32 quorumThresholdPercentage,
+            uint8 thresholdDenominator,
+            uint32 blockNumber,
+            NonSignerStakesAndSignatureSol memory nonSignerStakesAndSignature,
+            address callback_address,
+            bytes[] calldata outputs
+        );
+    }
+}
