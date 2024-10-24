@@ -235,7 +235,7 @@ async fn main() {
                                 .await
                             {
                                 Ok(operators) => {
-                                    let mut states_for_operators: HashMap<Vec<u8>, String> =
+                                    let mut states_for_operators: HashMap<String, String> =
                                         HashMap::new();
                                     for operator in operators {
                                         let operator_id = operator.1.operator_id;
@@ -282,7 +282,7 @@ async fn main() {
                                                 match response_json.get("state") {
                                                     Some(serde_json::Value::String(state)) => {
                                                         states_for_operators.insert(
-                                                            operator_id.to_vec(),
+                                                            hex::encode(operator_id.to_vec()),
                                                             state.to_string(),
                                                         );
                                                     }
@@ -296,7 +296,7 @@ async fn main() {
                                             }
                                             None => {
                                                 let json_error = serde_json::json!({
-                                                    "error": format!("No socket for operator_id = {:?}", operator_id)
+                                                    "error": format!("No socket for operator_id = {:?}", hex::encode(operator_id.to_vec()))
                                                 });
                                                 let json_error =
                                                     serde_json::to_string(&json_error).unwrap();
