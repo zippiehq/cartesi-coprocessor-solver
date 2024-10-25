@@ -732,8 +732,8 @@ fn subscribe_task_issued(
                                 .0,
                             },
                             quorum_nums.into(),
+                            100, // XXX ?
                             100,
-                            0,
                             current_block_num as u32,
                             non_signer_stakes_and_signature_response.clone().into(),
                             stream_event.callback,
