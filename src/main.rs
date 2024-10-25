@@ -55,7 +55,7 @@ struct Config {
 async fn main() {
     let config_string = std::fs::read_to_string("config.toml").unwrap();
     let config: Config = toml::from_str(&config_string).unwrap();
-    
+
     println!("Starting solver..");
     let arc_ws_endpoint = Arc::new(config.ws_endpoint.clone());
 
@@ -708,11 +708,15 @@ fn subscribe_task_issued(
                             .iter()
                             .map(|bytes| bytes.clone().1.into())
                             .collect();
+                        let mut hasher = Keccak256::new();
+                        hasher.update(&stream_event.input);
+                        let payload_hash = hasher.finalize();
                         let call_builder = contract.solverCallbackOutputsOnly(
                             ResponseSol {
-                                ruleSet: Address::parse_checksummed(ruleset.clone(), None).unwrap(),
+                                ruleSet: Address::parse_checksummed(format!("0x{ruleset}"), None)
+                                    .unwrap(),
                                 machineHash: stream_event.machineHash,
-                                payloadHash: B256::from_slice(&stream_event.input),
+                                payloadHash: payload_hash,
                                 outputMerkle: outputs_merkle::create_proofs(
                                     outputs
                                         .iter()
@@ -731,7 +735,6 @@ fn subscribe_task_issued(
                             stream_event.callback,
                             outputs,
                         );
-                        let pending_tx = call_builder.send().await.unwrap();
 
                         let root_provider = get_provider(http_endpoint.as_str());
 
@@ -752,6 +755,7 @@ fn subscribe_task_issued(
                             check_signatures_result._0.totalStakeForQuorum,
                             check_signatures_result._1
                         );
+                        let pending_tx = call_builder.send().await.unwrap();
                     }
                     Err(e) => println!(
                         "no operators found at block {:?}. Error {:?}",
