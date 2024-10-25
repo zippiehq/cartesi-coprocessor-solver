@@ -49,6 +49,7 @@ struct Config {
     task_issuer: Address,
     ruleset: String,
     socket: String,
+    secret_key: String,
 }
 #[async_std::main]
 async fn main() {
@@ -365,6 +366,7 @@ async fn main() {
     subscribe_task_issued(
         sockets_map.clone(),
         operators_info,
+        config.secret_key,
         config.ws_endpoint.clone(),
         config.http_endpoint.clone(),
         config.socket.clone(),
@@ -626,6 +628,7 @@ fn extract_number_array(values: Vec<serde_json::Value>) -> Vec<u8> {
 fn subscribe_task_issued(
     sockets_map: Arc<Mutex<HashMap<Vec<u8>, String>>>,
     operators_info: OperatorInfoServiceInMemory,
+    secret_key: String,
     ws_endpoint: String,
     http_endpoint: String,
     config_socket: String,
@@ -681,10 +684,9 @@ fn subscribe_task_issued(
                         .await
                         .unwrap();
 
-                        let secret_key = SecretKey::from_slice(
-                            &hex::decode(std::env::var("SECRET_KEY").unwrap()).unwrap(),
-                        )
-                        .unwrap();
+                        let secret_key =
+                            SecretKey::from_slice(&hex::decode(secret_key.clone()).unwrap())
+                                .unwrap();
                         let signer = PrivateKeySigner::from(secret_key);
                         let wallet = EthereumWallet::from(signer);
                         let provider = ProviderBuilder::new()
@@ -706,7 +708,7 @@ fn subscribe_task_issued(
                             .iter()
                             .map(|bytes| bytes.clone().1.into())
                             .collect();
-                        let call_builder = contract.callback(
+                        let call_builder = contract.solverCallbackOutputsOnly(
                             ResponseSol {
                                 ruleSet: Address::parse_checksummed(ruleset.clone(), None).unwrap(),
                                 machineHash: stream_event.machineHash,
@@ -910,7 +912,7 @@ sol! {
         constructor(address) {}
 
         #[derive(Debug)]
-        function callback(
+        function solverCallbackOutputsOnly(
             ResponseSol calldata resp,
             bytes calldata quorumNumbers,
             uint32 quorumThresholdPercentage,
