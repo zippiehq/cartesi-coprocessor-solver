@@ -1,6 +1,6 @@
 use alloy::signers::k256::SecretKey;
 use alloy_contract::Event;
-use alloy_primitives::{Address, FixedBytes, Keccak256, B256};
+use alloy_primitives::{keccak256, Address, FixedBytes, Keccak256, B256};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types_eth::Filter;
 use alloy_signer_local::PrivateKeySigner;
@@ -30,7 +30,6 @@ use hyper::{
     Body, Client, Request, Response, Server, StatusCode,
 };
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use std::{collections::HashMap, convert::Infallible, net::SocketAddr, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 use ICoprocessor::TaskIssued;
@@ -564,7 +563,9 @@ async fn handle_task_issued_operator(
 
                 task_response_buffer.extend_from_slice(&payload_keccak.to_vec());
                 task_response_buffer.extend_from_slice(&finish_result);
-                let task_response_digest = Sha256::digest(&task_response_buffer);
+
+                let task_response_digest = keccak256(&task_response_buffer);
+
                 bls_agg_service
                     .initialize_new_task(
                         TASK_INDEX,
@@ -579,7 +580,7 @@ async fn handle_task_issued_operator(
                 bls_agg_service
                     .process_new_signature(
                         TASK_INDEX,
-                        B256::from_slice(task_response_digest.as_slice()),
+                        task_response_digest,
                         Signature::new(g1),
                         operator_id.into(),
                     )
