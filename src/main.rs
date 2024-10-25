@@ -538,8 +538,7 @@ async fn handle_task_issued_operator(
                     for output in outputs_vector.clone() {
                         let mut hasher = Keccak256::new();
                         hasher.update(output.1.clone());
-                        let output_keccak = B256::from(hasher.finalize());
-                        keccak_outputs.push(output_keccak);
+                        keccak_outputs.push(hasher.finalize());
                     }
 
                     let proofs = outputs_merkle::create_proofs(keccak_outputs, HEIGHT).unwrap();
@@ -720,7 +719,11 @@ fn subscribe_task_issued(
                                 outputMerkle: outputs_merkle::create_proofs(
                                     outputs
                                         .iter()
-                                        .map(|element| B256::from_slice(&element.0))
+                                        .map(|element| {
+                                            let mut hasher = Keccak256::new();
+                                            hasher.update(&element.0);
+                                            hasher.finalize()
+                                        })
                                         .collect(),
                                     HEIGHT,
                                 )
