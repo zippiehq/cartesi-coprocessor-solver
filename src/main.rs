@@ -37,7 +37,6 @@ mod outputs_merkle;
 use alloy_network::EthereumWallet;
 const HEIGHT: usize = 63;
 const TASK_INDEX: u32 = 1;
-
 #[derive(Deserialize)]
 struct Config {
     http_endpoint: String,
@@ -690,6 +689,7 @@ fn subscribe_task_issued(
                         let signer = PrivateKeySigner::from(secret_key);
                         let wallet = EthereumWallet::from(signer);
                         let provider = ProviderBuilder::new()
+                            .with_recommended_fillers()
                             .wallet(wallet)
                             .on_http(http_endpoint.parse().unwrap());
                         let contract = ResponseCallbackContract::new(task_issuer, &provider);
@@ -709,35 +709,38 @@ fn subscribe_task_issued(
                         let mut hasher = Keccak256::new();
                         hasher.update(&stream_event.input);
                         let payload_hash = hasher.finalize();
-                        let call_builder = contract.solverCallbackOutputsOnly(
-                            ResponseSol {
-                                ruleSet: Address::parse_checksummed(format!("0x{ruleset}"), None)
+                        let call_builder = contract
+                            .solverCallbackOutputsOnly(
+                                ResponseSol {
+                                    ruleSet: Address::parse_checksummed(
+                                        format!("0x{ruleset}"),
+                                        None,
+                                    )
                                     .unwrap(),
-                                machineHash: stream_event.machineHash,
-                                payloadHash: payload_hash,
-                                outputMerkle: outputs_merkle::create_proofs(
-                                    outputs
-                                        .iter()
-                                        .map(|element| {
-                                            let mut hasher = Keccak256::new();
-                                            hasher.update(&element.0);
-                                            hasher.finalize()
-                                        })
-                                        .collect(),
-                                    HEIGHT,
-                                )
-                                .unwrap()
-                                .0,
-                            },
-                            quorum_nums.into(),
-                            100, // XXX ?
-                            100,
-                            current_block_num as u32,
-                            non_signer_stakes_and_signature_response.clone().into(),
-                            stream_event.callback,
-                            outputs,
-                        );
-
+                                    machineHash: stream_event.machineHash,
+                                    payloadHash: payload_hash,
+                                    outputMerkle: outputs_merkle::create_proofs(
+                                        outputs
+                                            .iter()
+                                            .map(|element| {
+                                                let mut hasher = Keccak256::new();
+                                                hasher.update(&element.0);
+                                                hasher.finalize()
+                                            })
+                                            .collect(),
+                                        HEIGHT,
+                                    )
+                                    .unwrap()
+                                    .0,
+                                },
+                                quorum_nums.into(),
+                                100, // XXX ?
+                                100,
+                                current_block_num as u32,
+                                non_signer_stakes_and_signature_response.clone().into(),
+                                stream_event.callback,
+                                outputs,
+                            );
                         let root_provider = get_provider(http_endpoint.as_str());
 
                         let service_manager = IBLSSignatureChecker::new(task_issuer, root_provider);
