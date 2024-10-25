@@ -690,10 +690,8 @@ fn subscribe_task_issued(
                         let signer = PrivateKeySigner::from(secret_key);
                         let wallet = EthereumWallet::from(signer);
                         let provider = ProviderBuilder::new()
-                            .with_recommended_fillers()
-                            .on_builtin(&http_endpoint)
-                            .await
-                            .unwrap();
+                            .wallet(wallet)
+                            .on_http(http_endpoint.parse().unwrap());
                         let contract = ResponseCallbackContract::new(task_issuer, &provider);
 
                         let non_signer_stakes_and_signature_response =
