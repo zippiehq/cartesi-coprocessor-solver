@@ -58,7 +58,7 @@ struct Config {
 }
 #[async_std::main]
 async fn main() {
-    let config_string = std::fs::read_to_string("config.sample.toml").unwrap();
+    let config_string = std::fs::read_to_string("config.toml").unwrap();
     let config: Config = toml::from_str(&config_string).unwrap();
     let manager =
         PostgresConnectionManager::new(config.postgre_connect_request.parse().unwrap(), NoTls);
