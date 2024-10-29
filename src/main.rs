@@ -6,7 +6,10 @@ use alloy_rpc_types_eth::Filter;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::sol;
 use ark_serialize::CanonicalDeserialize;
-use async_std::{sync::Mutex, task, task::JoinHandle};
+use async_std::{
+    sync::Mutex,
+    task::{self, JoinHandle},
+};
 use eigen_client_avsregistry::reader::AvsRegistryChainReader;
 use eigen_crypto_bls::{
     convert_to_bls_checker_g1_point, convert_to_bls_checker_g2_point, Signature,
@@ -29,6 +32,9 @@ use hyper::{
     service::{make_service_fn, service_fn},
     Body, Client, Request, Response, Server, StatusCode,
 };
+use postgres::fallible_iterator::FallibleIterator;
+use r2d2::Pool;
+use r2d2_postgres::{postgres::NoTls, PostgresConnectionManager};
 use serde::Deserialize;
 use std::{collections::HashMap, convert::Infallible, net::SocketAddr, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
@@ -48,12 +54,36 @@ struct Config {
     ruleset: String,
     socket: String,
     secret_key: String,
+    postgre_connect_request: String,
 }
 #[async_std::main]
 async fn main() {
-    let config_string = std::fs::read_to_string("config.toml").unwrap();
+    let config_string = std::fs::read_to_string("config.sample.toml").unwrap();
     let config: Config = toml::from_str(&config_string).unwrap();
-
+    let manager =
+        PostgresConnectionManager::new(config.postgre_connect_request.parse().unwrap(), NoTls);
+    let pool = r2d2::Pool::new(manager).unwrap();
+    let mut client = pool.get().unwrap();
+    client
+        .batch_execute(
+            "
+        CREATE TABLE IF NOT EXISTS issued_tasks (
+            id SERIAL PRIMARY KEY,
+            machineHash BYTEA,
+            input BYTEA,
+            callback BYTEA
+     )
+ ",
+        )
+        .unwrap();
+    client
+        .batch_execute(
+            "
+        CREATE UNIQUE INDEX IF NOT EXISTS unique_machine_input_callback 
+        ON issued_tasks (md5(machineHash || input || callback))
+",
+        )
+        .unwrap();
     println!("Starting solver..");
     let arc_ws_endpoint = Arc::new(config.ws_endpoint.clone());
 
@@ -361,17 +391,27 @@ async fn main() {
     println!("Server is listening on {}", addr);
     querying_thread.await;
     println!("Finished OperatorSocketUpdate querying");
+
+    //Subscriber which inserts new tasks into the DB
     subscribe_task_issued(
-        sockets_map.clone(),
         operators_info,
-        config.secret_key,
+        config.ws_endpoint.clone(),
+        config.task_issuer.clone(),
+        pool.clone(),
+    );
+
+    //Subscriber which handles new tasks received from DB
+    new_task_issued_handler(
         config.ws_endpoint.clone(),
         config.http_endpoint.clone(),
+        avs_registry_service.clone(),
+        sockets_map.clone(),
         config.socket.clone(),
-        config.task_issuer,
         config.ruleset,
         current_block_num,
-        avs_registry_service.clone(),
+        config.secret_key,
+        config.task_issuer,
+        pool.clone(),
     );
     subscribe_operator_socket_update(
         arc_ws_endpoint,
@@ -624,25 +664,170 @@ fn extract_number_array(values: Vec<serde_json::Value>) -> Vec<u8> {
 
     byte_vec
 }
-fn subscribe_task_issued(
-    sockets_map: Arc<Mutex<HashMap<Vec<u8>, String>>>,
-    operators_info: OperatorInfoServiceInMemory,
-    secret_key: String,
+
+fn new_task_issued_handler(
     ws_endpoint: String,
     http_endpoint: String,
-    config_socket: String,
-    task_issuer: Address,
-    ruleset: String,
-    current_block_num: u64,
     avs_registry_service: AvsRegistryServiceChainCaller<
         AvsRegistryChainReader,
         OperatorInfoServiceInMemory,
     >,
+    sockets_map: Arc<Mutex<HashMap<Vec<u8>, String>>>,
+    config_socket: String,
+    ruleset: String,
+    current_block_num: u64,
+    secret_key: String,
+    task_issuer: Address,
+    pool: Pool<PostgresConnectionManager<NoTls>>,
 ) {
     task::spawn({
-        let sockets_map = Arc::clone(&sockets_map);
+        async move {
+            let mut client = pool.get().unwrap();
+            let ws_connect = alloy_provider::WsConnect::new(ws_endpoint);
+            let ws_provider = alloy_provider::ProviderBuilder::new()
+                .on_ws(ws_connect)
+                .await
+                .unwrap();
+            let quorum_nums = [0];
+            let quorum_threshold_percentages = vec![100_u8];
+            let time_to_expiry = Duration::from_secs(10);
+            loop {
+                match client.query_one("DELETE FROM issued_tasks WHERE id = (SELECT id FROM issued_tasks ORDER BY id LIMIT 1) RETURNING *;", &[]) {
+                        Ok(row) => {
+                            let machine_hash: Vec<u8> = row.get(1);
+                            let input: Vec<u8> = row.get(2);
+                            let callback: Vec<u8> = row.get(3);
+        
+                            let task_issued = TaskIssued {
+                                machineHash: B256::from_slice(&machine_hash),
+                                input: input.into(),
+                                callback: Address::from_slice(&callback),
+                            };
+                            let current_block_number =
+                                ws_provider.clone().get_block_number().await.unwrap();
+                            match avs_registry_service
+                                .clone()
+                                .get_operators_avs_state_at_block(current_block_number as u32, &quorum_nums)
+                                .await
+                            {
+                                Ok(operators) => {
+                                    let bls_agg_response = handle_task_issued_operator(
+                                        operators,
+                                        false,
+                                        sockets_map.clone(),
+                                        config_socket.clone(),
+                                        task_issued.clone(),
+                                        avs_registry_service.clone(),
+                                        time_to_expiry,
+                                        ruleset.clone(),
+                                        current_block_num,
+                                        quorum_nums.to_vec(),
+                                        quorum_threshold_percentages.clone(),
+                                    )
+                                    .await
+                                    .unwrap();
+                                    let secret_key =
+                                        SecretKey::from_slice(&hex::decode(secret_key.clone()).unwrap())
+                                            .unwrap();
+                                    let signer = PrivateKeySigner::from(secret_key);
+                                    let wallet = EthereumWallet::from(signer);
+                                    let provider = ProviderBuilder::new()
+                                        .with_recommended_fillers()
+                                        .wallet(wallet)
+                                        .on_http(http_endpoint.parse().unwrap());
+                                    let contract = ResponseCallbackContract::new(task_issuer, &provider);
+        
+                                    let non_signer_stakes_and_signature_response =
+                                        agg_response_to_non_signer_stakes_and_signature(
+                                            bls_agg_response.0.clone(),
+                                        );
+        
+                                    let outputs: Vec<alloy_primitives::Bytes> = bls_agg_response
+                                        .1
+                                        .get(&bls_agg_response.0.task_response_digest)
+                                        .unwrap()
+                                        .iter()
+                                        .map(|bytes| bytes.clone().1.into())
+                                        .collect();
+                                    let call_builder = contract.solverCallbackOutputsOnly(
+                                        ResponseSol {
+                                            ruleSet: Address::parse_checksummed(
+                                                format!("0x{}", ruleset.clone()),
+                                                None,
+                                            )
+                                            .unwrap(),
+                                            machineHash: task_issued.machineHash,
+                                            payloadHash: B256::from_slice(&task_issued.input),
+                                            outputMerkle: outputs_merkle::create_proofs(
+                                                outputs
+                                                    .iter()
+                                                    .map(|element| B256::from_slice(&element.0))
+                                                    .collect(),
+                                                HEIGHT,
+                                            )
+                                            .unwrap()
+                                            .0,
+                                        },
+                                        quorum_nums.into(),
+                                        100,
+                                        0,
+                                        current_block_num as u32,
+                                        non_signer_stakes_and_signature_response.clone().into(),
+                                        task_issued.callback,
+                                        outputs,
+                                    );        
+                                    let root_provider = get_provider(http_endpoint.as_str());
+        
+                                    let service_manager =
+                                        IBLSSignatureChecker::new(task_issuer, root_provider);
+                                    let check_signatures_result = service_manager
+                                        .checkSignatures(
+                                            bls_agg_response.0.task_response_digest,
+                                            alloy_primitives::Bytes::from(quorum_nums.clone()),
+                                            current_block_num as u32,
+                                            non_signer_stakes_and_signature_response,
+                                        )
+                                        .call()
+                                        .await
+                                        .unwrap();
+                                    println!(
+                                        "check_signatures_result {:?} {:?} {:?}",
+                                        check_signatures_result._0.signedStakeForQuorum,
+                                        check_signatures_result._0.totalStakeForQuorum,
+                                        check_signatures_result._1
+                                    );
+                                    match call_builder.send().await {
+                                        Ok(pending_tx) => {},
+                                        Err(err) => {
+                                            println!("Transaction wasn't sent successfully: {err}");
+                                        },
+                                    }
+                                }
+                                Err(e) => println!(
+                                    "no operators found at block {:?}. Error {:?}",
+                                    current_block_number, e
+                                ),
+                            }
+                        },
+                        Err(_) => {
+                            client.batch_execute("LISTEN new_task_issued;").unwrap();
+                            let _ = client.notifications().blocking_iter().take(1).collect::<Vec<_>>().unwrap();
+                        },
+                    }
+            }
+        }
+    });
+}
+fn subscribe_task_issued(
+    operators_info: OperatorInfoServiceInMemory,
+    ws_endpoint: String,
+    task_issuer: Address,
+    pool: Pool<PostgresConnectionManager<NoTls>>,
+) {
+    task::spawn({
         async move {
             operators_info.past_querying_finished.notified().await;
+            let mut client = pool.get().unwrap();
             println!("Started TaskIssued subscription");
             let ws_connect = alloy_provider::WsConnect::new(ws_endpoint);
             let ws_provider = alloy_provider::ProviderBuilder::new()
@@ -655,118 +840,19 @@ fn subscribe_task_issued(
 
             let subscription = event.subscribe().await.unwrap();
             let mut stream = subscription.into_stream();
-            let quorum_nums = [0];
-            let quorum_threshold_percentages = vec![100_u8];
-            let time_to_expiry = Duration::from_secs(10);
             while let Ok((stream_event, _)) = stream.next().await.unwrap() {
                 println!("new TaskIssued {:?}", stream_event);
-                let current_block_number = ws_provider.clone().get_block_number().await.unwrap();
-                match avs_registry_service
-                    .clone()
-                    .get_operators_avs_state_at_block(current_block_number as u32, &quorum_nums)
-                    .await
-                {
-                    Ok(operators) => {
-                        let bls_agg_response = handle_task_issued_operator(
-                            operators,
-                            false,
-                            sockets_map.clone(),
-                            config_socket.clone(),
-                            stream_event.clone(),
-                            avs_registry_service.clone(),
-                            time_to_expiry,
-                            ruleset.clone(),
-                            current_block_num,
-                            quorum_nums.to_vec(),
-                            quorum_threshold_percentages.clone(),
-                        )
-                        .await
-                        .unwrap();
-
-                        let secret_key =
-                            SecretKey::from_slice(&hex::decode(secret_key.clone()).unwrap())
-                                .unwrap();
-                        let signer = PrivateKeySigner::from(secret_key);
-                        let wallet = EthereumWallet::from(signer);
-                        let provider = ProviderBuilder::new()
-                            .with_recommended_fillers()
-                            .wallet(wallet)
-                            .on_http(http_endpoint.parse().unwrap());
-                        let contract = ResponseCallbackContract::new(task_issuer, &provider);
-
-                        let non_signer_stakes_and_signature_response =
-                            agg_response_to_non_signer_stakes_and_signature(
-                                bls_agg_response.0.clone(),
-                            );
-
-                        let outputs: Vec<alloy_primitives::Bytes> = bls_agg_response
-                            .1
-                            .get(&bls_agg_response.0.task_response_digest)
-                            .unwrap()
-                            .iter()
-                            .map(|bytes| bytes.clone().1.into())
-                            .collect();
-                        let mut hasher = Keccak256::new();
-                        hasher.update(&stream_event.input);
-                        let payload_hash = hasher.finalize();
-                        let call_builder = contract
-                            .solverCallbackOutputsOnly(
-                                ResponseSol {
-                                    ruleSet: Address::parse_checksummed(
-                                        format!("0x{ruleset}"),
-                                        None,
-                                    )
-                                    .unwrap(),
-                                    machineHash: stream_event.machineHash,
-                                    payloadHash: payload_hash,
-                                    outputMerkle: outputs_merkle::create_proofs(
-                                        outputs
-                                            .iter()
-                                            .map(|element| {
-                                                let mut hasher = Keccak256::new();
-                                                hasher.update(&element.0);
-                                                hasher.finalize()
-                                            })
-                                            .collect(),
-                                        HEIGHT,
-                                    )
-                                    .unwrap()
-                                    .0,
-                                },
-                                quorum_nums.into(),
-                                100, // XXX ?
-                                100,
-                                current_block_num as u32,
-                                non_signer_stakes_and_signature_response.clone().into(),
-                                stream_event.callback,
-                                outputs,
-                            );
-                        let root_provider = get_provider(http_endpoint.as_str());
-
-                        let service_manager = IBLSSignatureChecker::new(task_issuer, root_provider);
-                        let check_signatures_result = service_manager
-                            .checkSignatures(
-                                bls_agg_response.0.task_response_digest,
-                                alloy_primitives::Bytes::from(quorum_nums.clone()),
-                                current_block_num as u32,
-                                non_signer_stakes_and_signature_response,
-                            )
-                            .call()
-                            .await
-                            .unwrap();
-                        println!(
-                            "check_signatures_result {:?} {:?} {:?}",
-                            check_signatures_result._0.signedStakeForQuorum,
-                            check_signatures_result._0.totalStakeForQuorum,
-                            check_signatures_result._1
-                        );
-                        let pending_tx = call_builder.send().await.unwrap();
-                    }
-                    Err(e) => println!(
-                        "no operators found at block {:?}. Error {:?}",
-                        current_block_number, e
-                    ),
-                }
+                match client.execute(
+                    "INSERT INTO issued_tasks (machineHash, input, callback) VALUES ($1, $2, $3)",
+                    &[
+                        &stream_event.machineHash.0.to_vec(),
+                        &stream_event.input.to_vec(),
+                        &stream_event.callback.to_vec(),
+                    ],
+                ) {
+                    Ok(_) => client.batch_execute("NOTIFY new_task_issued;").unwrap(),
+                    Err(_) => {}
+                };
             }
         }
     });
