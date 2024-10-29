@@ -6,10 +6,8 @@ use alloy_rpc_types_eth::Filter;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::sol;
 use ark_serialize::CanonicalDeserialize;
-use async_std::{
-    sync::Mutex,
-    task::{self, JoinHandle},
-};
+use bb8::Pool;
+use bb8_postgres::PostgresConnectionManager;
 use eigen_client_avsregistry::reader::AvsRegistryChainReader;
 use eigen_crypto_bls::{
     convert_to_bls_checker_g1_point, convert_to_bls_checker_g2_point, Signature,
@@ -26,21 +24,26 @@ use eigen_utils::{
         BN254::G1Point,
     },
 };
-use futures_util::StreamExt;
+use futures_util::FutureExt;
+use futures_util::{StreamExt, TryStreamExt};
 use hex::FromHex;
 use hyper::{
     service::{make_service_fn, service_fn},
     Body, Client, Request, Response, Server, StatusCode,
 };
-use postgres::fallible_iterator::FallibleIterator;
-use r2d2::Pool;
-use r2d2_postgres::{postgres::NoTls, PostgresConnectionManager};
 use serde::Deserialize;
-use std::{collections::HashMap, convert::Infallible, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap, convert::Infallible, net::SocketAddr, sync::Arc,
+    time::Duration,
+};
+use tokio::{sync::Mutex, task, task::JoinHandle};
+use tokio_postgres::{AsyncMessage, NoTls};
 use tokio_util::sync::CancellationToken;
 use ICoprocessor::TaskIssued;
 mod outputs_merkle;
 use alloy_network::EthereumWallet;
+use futures_util::stream;
+
 const HEIGHT: usize = 63;
 const TASK_INDEX: u32 = 1;
 #[derive(Deserialize)]
@@ -56,14 +59,15 @@ struct Config {
     secret_key: String,
     postgre_connect_request: String,
 }
-#[async_std::main]
+#[tokio::main]
 async fn main() {
     let config_string = std::fs::read_to_string("config.toml").unwrap();
     let config: Config = toml::from_str(&config_string).unwrap();
     let manager =
         PostgresConnectionManager::new(config.postgre_connect_request.parse().unwrap(), NoTls);
-    let pool = r2d2::Pool::new(manager).unwrap();
-    let mut client = pool.get().unwrap();
+
+    let pool = Pool::builder().build(manager).await.unwrap();
+    let client = pool.get().await.unwrap();
     client
         .batch_execute(
             "
@@ -75,6 +79,7 @@ async fn main() {
      )
  ",
         )
+        .await
         .unwrap();
     client
         .batch_execute(
@@ -83,6 +88,7 @@ async fn main() {
         ON issued_tasks (md5(machineHash || input || callback))
 ",
         )
+        .await
         .unwrap();
     println!("Starting solver..");
     let arc_ws_endpoint = Arc::new(config.ws_endpoint.clone());
@@ -400,7 +406,6 @@ async fn main() {
         config.task_issuer.clone(),
         pool.clone(),
     );
-
     //Subscriber which handles new tasks received from DB
     new_task_issued_handler(
         config.ws_endpoint.clone(),
@@ -413,6 +418,7 @@ async fn main() {
         config.secret_key,
         config.task_issuer,
         pool.clone(),
+        config.postgre_connect_request,
     );
     subscribe_operator_socket_update(
         arc_ws_endpoint,
@@ -680,10 +686,11 @@ fn new_task_issued_handler(
     secret_key: String,
     task_issuer: Address,
     pool: Pool<PostgresConnectionManager<NoTls>>,
+    postgre_connect_request: String
 ) {
     task::spawn({
         async move {
-            let mut client = pool.get().unwrap();
+            let client = pool.get().await.unwrap();
             let ws_connect = alloy_provider::WsConnect::new(ws_endpoint);
             let ws_provider = alloy_provider::ProviderBuilder::new()
                 .on_ws(ws_connect)
@@ -692,13 +699,29 @@ fn new_task_issued_handler(
             let quorum_nums = [0];
             let quorum_threshold_percentages = vec![100_u8];
             let time_to_expiry = Duration::from_secs(10);
+
+            let (notification_client, mut connection) = tokio_postgres::connect(&postgre_connect_request, NoTls)
+                            .await
+                            .unwrap();
+                        let (tx,  rx) = futures_channel::mpsc::unbounded();
+                        let stream =
+                            stream::poll_fn(move |cx| connection.poll_message(cx)).map_err(|e| panic!("{}", e));
+                        let connection = stream.forward(tx).map(|r| r.unwrap());
+                        tokio::spawn(connection);
+            let mut notification_filter = rx
+            .filter_map(|m| match m {
+                AsyncMessage::Notification(n) => futures_util::future::ready(Some(n)),
+                _ => futures_util::future::ready(None),
+            });
+
             loop {
-                match client.query_one("DELETE FROM issued_tasks WHERE id = (SELECT id FROM issued_tasks ORDER BY id LIMIT 1) RETURNING *;", &[]) {
+                match client.query_one("DELETE FROM issued_tasks WHERE id = (SELECT id FROM issued_tasks ORDER BY id LIMIT 1) RETURNING *;", &[]).await {
                         Ok(row) => {
                             let machine_hash: Vec<u8> = row.get(1);
                             let input: Vec<u8> = row.get(2);
                             let callback: Vec<u8> = row.get(3);
-        
+                            println!("machine_hash {:?}, input {:?}, callback {:?}", machine_hash, input.clone(), callback);
+
                             let task_issued = TaskIssued {
                                 machineHash: B256::from_slice(&machine_hash),
                                 input: input.into(),
@@ -737,12 +760,10 @@ fn new_task_issued_handler(
                                         .wallet(wallet)
                                         .on_http(http_endpoint.parse().unwrap());
                                     let contract = ResponseCallbackContract::new(task_issuer, &provider);
-        
                                     let non_signer_stakes_and_signature_response =
                                         agg_response_to_non_signer_stakes_and_signature(
                                             bls_agg_response.0.clone(),
                                         );
-        
                                     let outputs: Vec<alloy_primitives::Bytes> = bls_agg_response
                                         .1
                                         .get(&bls_agg_response.0.task_response_digest)
@@ -776,9 +797,8 @@ fn new_task_issued_handler(
                                         non_signer_stakes_and_signature_response.clone().into(),
                                         task_issued.callback,
                                         outputs,
-                                    );        
+                                    );
                                     let root_provider = get_provider(http_endpoint.as_str());
-        
                                     let service_manager =
                                         IBLSSignatureChecker::new(task_issuer, root_provider);
                                     let check_signatures_result = service_manager
@@ -811,14 +831,18 @@ fn new_task_issued_handler(
                             }
                         },
                         Err(_) => {
-                            client.batch_execute("LISTEN new_task_issued;").unwrap();
-                            let _ = client.notifications().blocking_iter().take(1).collect::<Vec<_>>().unwrap();
+                            println!("waiting for new notifications");
+                            notification_client.batch_execute("LISTEN new_task_issued;").await.unwrap();
+                            notification_filter
+                            .next()
+                            .await;
                         },
                     }
             }
         }
     });
 }
+
 fn subscribe_task_issued(
     ws_endpoint: String,
     task_issuer: Address,
@@ -826,7 +850,7 @@ fn subscribe_task_issued(
 ) {
     task::spawn({
         async move {
-            let mut client = pool.get().unwrap();
+            let client = pool.get().await.unwrap();
             println!("Started TaskIssued subscription");
             let ws_connect = alloy_provider::WsConnect::new(ws_endpoint);
             let ws_provider = alloy_provider::ProviderBuilder::new()
@@ -848,8 +872,15 @@ fn subscribe_task_issued(
                         &stream_event.input.to_vec(),
                         &stream_event.callback.to_vec(),
                     ],
-                ) {
-                    Ok(_) => client.batch_execute("NOTIFY new_task_issued;").unwrap(),
+                ).await {
+                    Ok(_) => { 
+                    client
+                    .batch_execute(
+                        "
+                        NOTIFY new_task_issued;",
+                    )
+                    .await.unwrap();
+                },
                     Err(_) => {}
                 };
             }
