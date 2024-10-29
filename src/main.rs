@@ -124,6 +124,8 @@ async fn main() {
                 .unwrap();
         }
     });
+
+    operators_info.past_querying_finished.notified().await;
     let sockets_map: Arc<Mutex<HashMap<Vec<u8>, String>>> = Arc::new(Mutex::new(HashMap::new()));
     let current_last_block = Arc::new(Mutex::new(config.current_first_block));
     let querying_thread = query_operator_socket_update(
@@ -394,7 +396,6 @@ async fn main() {
 
     //Subscriber which inserts new tasks into the DB
     subscribe_task_issued(
-        operators_info,
         config.ws_endpoint.clone(),
         config.task_issuer.clone(),
         pool.clone(),
@@ -819,14 +820,12 @@ fn new_task_issued_handler(
     });
 }
 fn subscribe_task_issued(
-    operators_info: OperatorInfoServiceInMemory,
     ws_endpoint: String,
     task_issuer: Address,
     pool: Pool<PostgresConnectionManager<NoTls>>,
 ) {
     task::spawn({
         async move {
-            operators_info.past_querying_finished.notified().await;
             let mut client = pool.get().unwrap();
             println!("Started TaskIssued subscription");
             let ws_connect = alloy_provider::WsConnect::new(ws_endpoint);
