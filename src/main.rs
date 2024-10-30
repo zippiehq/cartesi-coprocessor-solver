@@ -3,7 +3,7 @@ use alloy_contract::Event;
 use alloy_primitives::{keccak256, Address, FixedBytes, Keccak256, B256};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types_eth::Filter;
-use alloy_signer_local::PrivateKeySigner;
+use alloy_signer_local::{MnemonicBuilder, PrivateKeySigner};
 use alloy_sol_types::sol;
 use ark_serialize::CanonicalDeserialize;
 use bb8::Pool;
@@ -32,10 +32,7 @@ use hyper::{
     Body, Client, Request, Response, Server, StatusCode,
 };
 use serde::Deserialize;
-use std::{
-    collections::HashMap, convert::Infallible, net::SocketAddr, sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, convert::Infallible, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{sync::Mutex, task, task::JoinHandle};
 use tokio_postgres::{AsyncMessage, NoTls};
 use tokio_util::sync::CancellationToken;
@@ -81,6 +78,7 @@ async fn main() {
         )
         .await
         .unwrap();
+
     client
         .batch_execute(
             "
@@ -90,6 +88,10 @@ async fn main() {
         )
         .await
         .unwrap();
+
+    client
+        .batch_execute("CREATE TABLE IF NOT EXISTS addresses (id SERIAL PRIMARY KEY, eth_address BYTEA UNIQUE)").await.unwrap();
+
     println!("Starting solver..");
     let arc_ws_endpoint = Arc::new(config.ws_endpoint.clone());
 
@@ -148,23 +150,67 @@ async fn main() {
         let avs_registry_service = avs_registry_service.clone();
         let ws_endpoint = config.ws_endpoint.clone();
         let config_socket = config.socket.clone();
-
+        let pool = pool.clone();
         let sockets_map = sockets_map.clone();
         let ruleset = ruleset.clone();
+        let secret_key = config.secret_key.clone();
         async move {
             Ok::<_, Infallible>(service_fn(move |req| {
                 let avs_registry_service = avs_registry_service.clone();
                 let ws_endpoint = ws_endpoint.clone();
                 let config_socket = config_socket.clone();
+                let pool = pool.clone();
 
                 let sockets_map = sockets_map.clone();
                 let ruleset = ruleset.clone();
+                let secret_key = secret_key.clone();
 
                 async move {
                     let path = req.uri().path().to_owned();
                     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
                     match (req.method().clone(), &segments as &[&str]) {
+                        (hyper::Method::POST, ["eth_address", eth_address]) => {
+                            let eth_address = match Address::parse_checksummed(eth_address, None) {
+                                Ok(address) => address,
+                                Err(err) => {
+                                    let json_error = serde_json::json!({
+                                        "error": err.to_string()
+                                    });
+                                    let json_error = serde_json::to_string(&json_error).unwrap();
+                                    let response = Response::builder()
+                                        .status(StatusCode::BAD_REQUEST)
+                                        .body(Body::from(json_error))
+                                        .unwrap();
+                                    return Ok::<_, Infallible>(response);
+                                }
+                            };
+                            let mut client = pool.get().await.unwrap();
+                            let _ = client.execute(
+                                "INSERT INTO addresses (eth_address) VALUES ($1)",
+                                &[&eth_address.0 .0.to_vec()],
+                            );
+                            let address_index = client
+                                .query_one(
+                                    "SELECT id FROM addresses WHERE eth_address = $1 ",
+                                    &[&eth_address.0 .0.to_vec()],
+                                )
+                                .await
+                                .unwrap();
+                            let index: i32 = address_index.get(0);
+
+                            let builder =
+                                MnemonicBuilder::<coins_bip39::wordlist::english::English>::default().index(index as u32).unwrap().phrase(secret_key).build().unwrap();
+                            let json_response = serde_json::json!({
+                                "eth_address": builder.address()
+                            });
+                            let json_response = serde_json::to_string(&json_response).unwrap();
+                            let response = Response::builder()
+                                .status(StatusCode::OK)
+                                .body(Body::from(json_response))
+                                .unwrap();
+                            return Ok::<_, Infallible>(response);
+                        }
                         (hyper::Method::POST, ["issue_task", machine_hash, callback]) => {
                             let input = hyper::body::to_bytes(req.into_body())
                                 .await
@@ -415,7 +461,7 @@ async fn main() {
         config.socket.clone(),
         config.ruleset,
         current_block_num,
-        config.secret_key,
+        config.secret_key.clone(),
         config.task_issuer,
         pool.clone(),
         config.postgre_connect_request,
@@ -686,7 +732,7 @@ fn new_task_issued_handler(
     secret_key: String,
     task_issuer: Address,
     pool: Pool<PostgresConnectionManager<NoTls>>,
-    postgre_connect_request: String
+    postgre_connect_request: String,
 ) {
     task::spawn({
         async move {
@@ -700,16 +746,16 @@ fn new_task_issued_handler(
             let quorum_threshold_percentages = vec![100_u8];
             let time_to_expiry = Duration::from_secs(10);
 
-            let (notification_client, mut connection) = tokio_postgres::connect(&postgre_connect_request, NoTls)
-                            .await
-                            .unwrap();
-                        let (tx,  rx) = futures_channel::mpsc::unbounded();
-                        let stream =
-                            stream::poll_fn(move |cx| connection.poll_message(cx)).map_err(|e| panic!("{}", e));
-                        let connection = stream.forward(tx).map(|r| r.unwrap());
-                        tokio::spawn(connection);
-            let mut notification_filter = rx
-            .filter_map(|m| match m {
+            let (notification_client, mut connection) =
+                tokio_postgres::connect(&postgre_connect_request, NoTls)
+                    .await
+                    .unwrap();
+            let (tx, rx) = futures_channel::mpsc::unbounded();
+            let stream =
+                stream::poll_fn(move |cx| connection.poll_message(cx)).map_err(|e| panic!("{}", e));
+            let connection = stream.forward(tx).map(|r| r.unwrap());
+            tokio::spawn(connection);
+            let mut notification_filter = rx.filter_map(|m| match m {
                 AsyncMessage::Notification(n) => futures_util::future::ready(Some(n)),
                 _ => futures_util::future::ready(None),
             });
@@ -720,8 +766,6 @@ fn new_task_issued_handler(
                             let machine_hash: Vec<u8> = row.get(1);
                             let input: Vec<u8> = row.get(2);
                             let callback: Vec<u8> = row.get(3);
-                            println!("machine_hash {:?}, input {:?}, callback {:?}", machine_hash, input.clone(), callback);
-
                             let task_issued = TaskIssued {
                                 machineHash: B256::from_slice(&machine_hash),
                                 input: input.into(),
@@ -873,7 +917,7 @@ fn subscribe_task_issued(
                         &stream_event.callback.to_vec(),
                     ],
                 ).await {
-                    Ok(_) => { 
+                    Ok(_) => {
                     client
                     .batch_execute(
                         "
