@@ -792,7 +792,7 @@ fn new_task_issued_handler(
                                         },
                                         quorum_nums.into(),
                                         100,
-                                        0,
+                                        100,
                                         current_block_num as u32,
                                         non_signer_stakes_and_signature_response.clone().into(),
                                         task_issued.callback,
