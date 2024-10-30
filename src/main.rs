@@ -779,11 +779,11 @@ fn new_task_issued_handler(
                                             )
                                             .unwrap(),
                                             machineHash: task_issued.machineHash,
-                                            payloadHash: B256::from_slice(&task_issued.input),
+                                            payloadHash: keccak256(&task_issued.input),
                                             outputMerkle: outputs_merkle::create_proofs(
                                                 outputs
                                                     .iter()
-                                                    .map(|element| B256::from_slice(&element.0))
+                                                    .map(|element| keccak256(&element.0))
                                                     .collect(),
                                                 HEIGHT,
                                             )
