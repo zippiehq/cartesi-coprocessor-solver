@@ -1,6 +1,6 @@
 #!/bin/bash
 
-CONFIG_FILE="config.toml"
+CONFIG_FILE="/cartesi-coprocessor-solver/config.toml"
 
 if [ -n "$SECRET_KEY" ]; then
   if [ -s "$CONFIG_FILE" ]; then
