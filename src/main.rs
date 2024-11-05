@@ -497,6 +497,8 @@ async fn main() {
         config.task_issuer.clone(),
         pool.clone(),
         config.secret_key.clone(),
+        config.payment_phrase.clone(),
+
     );
     //Subscriber which handles new tasks received from DB
     new_task_issued_handler(
@@ -963,6 +965,7 @@ fn subscribe_task_issued(
     task_issuer: Address,
     pool: Pool<PostgresConnectionManager<NoTls>>,
     secret_key: String,
+    payment_phrase: String
 ) {
     task::spawn({
         async move {
@@ -984,7 +987,7 @@ fn subscribe_task_issued(
                 let generated_address = generate_eth_address(
                     pool.clone(),
                     stream_event.machineHash,
-                    secret_key.clone(),
+                    payment_phrase.clone(),
                 )
                 .await;
                 let secret_key =
