@@ -4,6 +4,7 @@ registry_coordinator_address = "0x45cE5242DF4Cdd6CB925C6296732487D15216bc9"
 operator_state_retriever_address = "0x4fEcf2c85D2FB1E1A35906B737Cd90bb85c05E1C"
 current_first_block = 20669157
 task_issuer = "0xB819BA4c5d2b64d07575ff4B30d3e0Eca219BFd5"
+callback_address = "0xB819BA4c5d2b64d07575ff4B30d3e0Eca219BFd5"
 ruleset = "B819BA4c5d2b64d07575ff4B30d3e0Eca219BFd5"
 socket = "http://localhost:3033"
 secret_key = ""

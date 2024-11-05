@@ -55,6 +55,7 @@ struct Config {
     operator_state_retriever_address: Address,
     current_first_block: u64,
     task_issuer: Address,
+    callback_address: Address,
     ruleset: String,
     socket: String,
     secret_key: String,
@@ -505,6 +506,7 @@ async fn main() {
         current_block_num,
         config.secret_key.clone(),
         config.task_issuer,
+        config.callback_address,
         pool.clone(),
         config.postgre_connect_request,
     );
@@ -773,6 +775,7 @@ fn new_task_issued_handler(
     current_block_num: u64,
     secret_key: String,
     task_issuer: Address,
+    callback_address: Address,
     pool: Pool<PostgresConnectionManager<NoTls>>,
     postgre_connect_request: String,
 ) {
@@ -858,7 +861,7 @@ fn new_task_issued_handler(
                                     .wallet(wallet)
                                     .on_http(http_endpoint.parse().unwrap());
                                 let contract =
-                                    ResponseCallbackContract::new(task_issuer, &provider);
+                                    ResponseCallbackContract::new(callback_address, &provider);
                                 let non_signer_stakes_and_signature_response =
                                     agg_response_to_non_signer_stakes_and_signature(
                                         bls_agg_response.0.clone(),
