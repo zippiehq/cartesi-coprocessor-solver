@@ -1004,12 +1004,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "anyhow"
-version = "1.0.91"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c042108f3ed77fd83760a5fd79b53be043192bb3b9dba91d8c574c0ada7850c8"
-
-[[package]]
 name = "ark-bn254"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2210,7 +2204,7 @@ dependencies = [
 [[package]]
 name = "eigen-client-avsregistry"
 version = "0.1.0"
-source = "git+https://github.com/dymchenkko/eigensdk-rs?rev=5e24a28e5f8de753e856ca4d11c9c63e3a08e315#5e24a28e5f8de753e856ca4d11c9c63e3a08e315"
+source = "git+https://github.com/dymchenkko/eigensdk-rs?rev=0b727925b2b07e0a49d17ee90a0647e27380ab74#0b727925b2b07e0a49d17ee90a0647e27380ab74"
 dependencies = [
  "alloy 0.4.2",
  "alloy-primitives",
@@ -2231,7 +2225,7 @@ dependencies = [
 [[package]]
 name = "eigen-client-elcontracts"
 version = "0.1.0"
-source = "git+https://github.com/dymchenkko/eigensdk-rs?rev=5e24a28e5f8de753e856ca4d11c9c63e3a08e315#5e24a28e5f8de753e856ca4d11c9c63e3a08e315"
+source = "git+https://github.com/dymchenkko/eigensdk-rs?rev=0b727925b2b07e0a49d17ee90a0647e27380ab74#0b727925b2b07e0a49d17ee90a0647e27380ab74"
 dependencies = [
  "alloy 0.4.2",
  "alloy-primitives",
@@ -2245,7 +2239,7 @@ dependencies = [
 [[package]]
 name = "eigen-crypto-bls"
 version = "0.1.0"
-source = "git+https://github.com/dymchenkko/eigensdk-rs?rev=5e24a28e5f8de753e856ca4d11c9c63e3a08e315#5e24a28e5f8de753e856ca4d11c9c63e3a08e315"
+source = "git+https://github.com/dymchenkko/eigensdk-rs?rev=0b727925b2b07e0a49d17ee90a0647e27380ab74#0b727925b2b07e0a49d17ee90a0647e27380ab74"
 dependencies = [
  "alloy-primitives",
  "ark-bn254",
@@ -2262,7 +2256,7 @@ dependencies = [
 [[package]]
 name = "eigen-crypto-bn254"
 version = "0.1.0"
-source = "git+https://github.com/dymchenkko/eigensdk-rs?rev=5e24a28e5f8de753e856ca4d11c9c63e3a08e315#5e24a28e5f8de753e856ca4d11c9c63e3a08e315"
+source = "git+https://github.com/dymchenkko/eigensdk-rs?rev=0b727925b2b07e0a49d17ee90a0647e27380ab74#0b727925b2b07e0a49d17ee90a0647e27380ab74"
 dependencies = [
  "ark-bn254",
  "ark-ec",
@@ -2274,7 +2268,7 @@ dependencies = [
 [[package]]
 name = "eigen-logging"
 version = "0.1.0"
-source = "git+https://github.com/dymchenkko/eigensdk-rs?rev=5e24a28e5f8de753e856ca4d11c9c63e3a08e315#5e24a28e5f8de753e856ca4d11c9c63e3a08e315"
+source = "git+https://github.com/dymchenkko/eigensdk-rs?rev=0b727925b2b07e0a49d17ee90a0647e27380ab74#0b727925b2b07e0a49d17ee90a0647e27380ab74"
 dependencies = [
  "ctor",
  "once_cell",
@@ -2285,7 +2279,7 @@ dependencies = [
 [[package]]
 name = "eigen-services-avsregistry"
 version = "0.1.0"
-source = "git+https://github.com/dymchenkko/eigensdk-rs?rev=5e24a28e5f8de753e856ca4d11c9c63e3a08e315#5e24a28e5f8de753e856ca4d11c9c63e3a08e315"
+source = "git+https://github.com/dymchenkko/eigensdk-rs?rev=0b727925b2b07e0a49d17ee90a0647e27380ab74#0b727925b2b07e0a49d17ee90a0647e27380ab74"
 dependencies = [
  "alloy-primitives",
  "ark-bn254",
@@ -2301,7 +2295,7 @@ dependencies = [
 [[package]]
 name = "eigen-services-blsaggregation"
 version = "0.1.0"
-source = "git+https://github.com/dymchenkko/eigensdk-rs?rev=5e24a28e5f8de753e856ca4d11c9c63e3a08e315#5e24a28e5f8de753e856ca4d11c9c63e3a08e315"
+source = "git+https://github.com/dymchenkko/eigensdk-rs?rev=0b727925b2b07e0a49d17ee90a0647e27380ab74#0b727925b2b07e0a49d17ee90a0647e27380ab74"
 dependencies = [
  "alloy 0.4.2",
  "alloy-primitives",
@@ -2322,17 +2316,18 @@ dependencies = [
 [[package]]
 name = "eigen-services-operatorsinfo"
 version = "0.1.0"
-source = "git+https://github.com/dymchenkko/eigensdk-rs?rev=5e24a28e5f8de753e856ca4d11c9c63e3a08e315#5e24a28e5f8de753e856ca4d11c9c63e3a08e315"
+source = "git+https://github.com/dymchenkko/eigensdk-rs?rev=0b727925b2b07e0a49d17ee90a0647e27380ab74#0b727925b2b07e0a49d17ee90a0647e27380ab74"
 dependencies = [
  "alloy 0.4.2",
  "alloy-primitives",
- "anyhow",
  "async-trait",
  "eigen-client-avsregistry",
  "eigen-crypto-bls",
  "eigen-logging",
  "eigen-types",
  "eigen-utils",
+ "eyre",
+ "futures",
  "futures-util",
  "thiserror",
  "tokio",
@@ -2342,10 +2337,9 @@ dependencies = [
 [[package]]
 name = "eigen-types"
 version = "0.1.0"
-source = "git+https://github.com/dymchenkko/eigensdk-rs?rev=5e24a28e5f8de753e856ca4d11c9c63e3a08e315#5e24a28e5f8de753e856ca4d11c9c63e3a08e315"
+source = "git+https://github.com/dymchenkko/eigensdk-rs?rev=0b727925b2b07e0a49d17ee90a0647e27380ab74#0b727925b2b07e0a49d17ee90a0647e27380ab74"
 dependencies = [
  "alloy-primitives",
- "ark-serialize 0.4.2",
  "eigen-crypto-bls",
  "ethers",
  "num-bigint",
@@ -2356,7 +2350,7 @@ dependencies = [
 [[package]]
 name = "eigen-utils"
 version = "0.1.0"
-source = "git+https://github.com/dymchenkko/eigensdk-rs?rev=5e24a28e5f8de753e856ca4d11c9c63e3a08e315#5e24a28e5f8de753e856ca4d11c9c63e3a08e315"
+source = "git+https://github.com/dymchenkko/eigensdk-rs?rev=0b727925b2b07e0a49d17ee90a0647e27380ab74#0b727925b2b07e0a49d17ee90a0647e27380ab74"
 dependencies = [
  "alloy 0.4.2",
  "reqwest 0.12.9",

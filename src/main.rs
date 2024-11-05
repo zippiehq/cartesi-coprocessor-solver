@@ -136,7 +136,9 @@ async fn main() {
         avs_registry_reader.clone(),
         config.ws_endpoint.clone(),
     )
-    .await;
+    .await
+    .unwrap()
+    .0;
     let avs_registry_service =
         AvsRegistryServiceChainCaller::new(avs_registry_reader, operators_info.clone());
 
@@ -258,7 +260,7 @@ async fn main() {
                             {
                                 Ok(operators) => {
                                     let task_issued = TaskIssued {
-                                        machineHash: B256::from_hex(&machine_hash).unwrap(),
+                                        machineHash: B256::from_hex(machine_hash).unwrap(),
                                         input: input.into(),
                                         callback: Address::parse_checksummed(callback, None)
                                             .expect("can't convert callback to Address"),
@@ -322,7 +324,7 @@ async fn main() {
                         (hyper::Method::POST, ["ensure", cid_str, machine_hash, size_str]) => {
                             let generated_address = generate_eth_address(
                                 pool.clone(),
-                                B256::from_hex(&machine_hash).unwrap(),
+                                B256::from_hex(machine_hash).unwrap(),
                                 payment_phrase,
                             )
                             .await;
@@ -696,7 +698,7 @@ async fn handle_task_issued_operator(
                 task_response_buffer.extend_from_slice(&stream_event.machineHash.to_vec());
 
                 let mut hasher = Keccak256::new();
-                hasher.update(&stream_event.input.clone());
+                hasher.update(stream_event.input.clone());
                 let payload_keccak = hasher.finalize();
 
                 task_response_buffer.extend_from_slice(&payload_keccak.to_vec());
