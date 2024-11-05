@@ -58,6 +58,7 @@ struct Config {
     ruleset: String,
     socket: String,
     secret_key: String,
+    payment_phrase: String,
     postgre_connect_request: String,
     payment_token: Address,
 }
@@ -180,6 +181,8 @@ async fn main() {
         let sockets_map = sockets_map.clone();
         let ruleset = ruleset.clone();
         let secret_key = config.secret_key.clone();
+        let payment_phrase = config.payment_phrase.clone();
+
         async move {
             Ok::<_, Infallible>(service_fn(move |req| {
                 let avs_registry_service = avs_registry_service.clone();
@@ -192,6 +195,7 @@ async fn main() {
                 let sockets_map = sockets_map.clone();
                 let ruleset = ruleset.clone();
                 let secret_key = secret_key.clone();
+                let payment_phrase = payment_phrase.clone();
 
                 async move {
                     let path = req.uri().path().to_owned();
@@ -215,7 +219,7 @@ async fn main() {
                             };
 
                             let generated_address =
-                                generate_eth_address(pool, machine_hash, secret_key).await;
+                                generate_eth_address(pool, machine_hash, payment_phrase).await;
                             let json_response = serde_json::json!({
                                 "eth_address": generated_address
                             });
@@ -319,7 +323,7 @@ async fn main() {
                             let generated_address = generate_eth_address(
                                 pool.clone(),
                                 B256::from_hex(&machine_hash).unwrap(),
-                                secret_key.clone(),
+                                payment_phrase,
                             )
                             .await;
                             let secret_key =
@@ -1067,7 +1071,7 @@ fn subscribe_operator_socket_update(
 async fn generate_eth_address(
     pool: Pool<PostgresConnectionManager<NoTls>>,
     machine_hash: FixedBytes<32>,
-    secret_key: String,
+    payment_phrase: String,
 ) -> Address {
     let client = pool.get().await.unwrap();
     let _ = client
@@ -1089,7 +1093,7 @@ async fn generate_eth_address(
     let builder = MnemonicBuilder::<coins_bip39::wordlist::english::English>::default()
         .index(index as u32)
         .unwrap()
-        .phrase(secret_key)
+        .phrase(payment_phrase)
         .build()
         .unwrap();
     builder.address()
