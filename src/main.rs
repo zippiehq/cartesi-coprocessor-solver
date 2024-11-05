@@ -97,7 +97,6 @@ async fn main() {
             machineHash BYTEA,
             input BYTEA,
             callback BYTEA,
-            issuer BYTEA,
             status task_status
         )
  ",
@@ -108,7 +107,7 @@ async fn main() {
         .batch_execute(
             "
         CREATE UNIQUE INDEX IF NOT EXISTS unique_machine_input_callback 
-        ON issued_tasks ((machineHash || input || callback || issuer))
+        ON issued_tasks ((machineHash || input || callback))
 ",
         )
         .await
@@ -227,7 +226,7 @@ async fn main() {
                                 .unwrap();
                             return Ok::<_, Infallible>(response);
                         }
-                        (hyper::Method::POST, ["issue_task", machine_hash, callback, issuer]) => {
+                        (hyper::Method::POST, ["issue_task", machine_hash, callback]) => {
                             let input = hyper::body::to_bytes(req.into_body())
                                 .await
                                 .unwrap()
@@ -259,8 +258,6 @@ async fn main() {
                                         input: input.into(),
                                         callback: Address::parse_checksummed(callback, None)
                                             .expect("can't convert callback to Address"),
-                                        issuer: Address::parse_checksummed(issuer, None)
-                                            .expect("can't convert issuer to Address"),
                                     };
                                     let bls_agg_response = handle_task_issued_operator(
                                         operators,
@@ -485,7 +482,7 @@ async fn main() {
     });
     let server = Server::bind(&addr).serve(Box::new(service));
     println!("Server is listening on {}", addr);
-    querying_thread.await;
+    let _ = querying_thread.await;
     println!("Finished OperatorSocketUpdate querying");
 
     //Subscriber which inserts new tasks into the DB
@@ -818,13 +815,11 @@ fn new_task_issued_handler(
                         let machine_hash: Vec<u8> = row.get(1);
                         let input: Vec<u8> = row.get(2);
                         let callback: Vec<u8> = row.get(3);
-                        let issuer: Vec<u8> = row.get(4);
 
                         let task_issued = TaskIssued {
                             machineHash: B256::from_slice(&machine_hash),
                             input: input.into(),
                             callback: Address::from_slice(&callback),
-                            issuer: Address::from_slice(&issuer),
                         };
                         let current_block_number =
                             ws_provider.clone().get_block_number().await.unwrap();
@@ -908,7 +903,7 @@ fn new_task_issued_handler(
                                 let check_signatures_result = service_manager
                                     .checkSignatures(
                                         bls_agg_response.0.task_response_digest,
-                                        alloy_primitives::Bytes::from(quorum_nums.clone()),
+                                        alloy_primitives::Bytes::from(quorum_nums),
                                         current_block_num as u32,
                                         non_signer_stakes_and_signature_response,
                                     )
@@ -922,7 +917,7 @@ fn new_task_issued_handler(
                                     check_signatures_result._1
                                 );
                                 match call_builder.send().await {
-                                    Ok(pending_tx) => {}
+                                    Ok(_pending_tx) => {}
                                     Err(err) => {
                                         println!("Transaction wasn't sent successfully: {err}");
                                     }
@@ -1007,12 +1002,11 @@ fn subscribe_task_issued(
                     }
                 }
                 match client.execute(
-                    "INSERT INTO issued_tasks (machineHash, input, callback, issuer, status) VALUES ($1, $2, $3, $4, $5::task_status)",
+                    "INSERT INTO issued_tasks (machineHash, input, callback, status) VALUES ($1, $2, $3, $4::task_status)",
                     &[
                         &stream_event.machineHash.0.to_vec(),
                         &stream_event.input.to_vec(),
                         &stream_event.callback.to_vec(),
-                        &stream_event.issuer.to_vec(),
                         &task_status::waits_for_handling
                     ],
                 ).await {
@@ -1167,7 +1161,7 @@ fn agg_response_to_non_signer_stakes_and_signature(
 sol!(
    interface ICoprocessor {
         #[derive(Debug)]
-        event TaskIssued(bytes32 machineHash, bytes input, address callback, address issuer);
+        event TaskIssued(bytes32 machineHash, bytes input, address callback);
    }
 );
 
