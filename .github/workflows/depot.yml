@@ -1,0 +1,47 @@
+name: solver
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - '*'
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build:
+    name: Depot Build
+    runs-on: depot-ubuntu-22.04-4
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v2
+
+      - name: Login to GitHub Container Registry (GHCR)
+        uses: docker/login-action@v2
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Depot CLI
+        uses: depot/setup-action@v1
+        env:
+          DEPOT_TOKEN: ${{ secrets.DEPOT_API_TOKEN }}
+
+      - name: Build and Load Docker Image with Depot
+        run: |
+          depot build . \
+            --project hs0gfs4l0l \
+            --file Dockerfile \
+            --tag ${{ env.REGISTRY }}/${{ github.repository }}:latest \
+            --platform linux/amd64 \
+            --build-arg RELEASE=--release \
+            --build-arg ARCH=amd64 \
+            --build-arg RELEASE_DIR=release \
+            --load
+        env:
+          DEPOT_TOKEN: ${{ secrets.DEPOT_API_TOKEN }}
