@@ -36,53 +36,47 @@ jobs:
         depot build . \
           --project hs0gfs4l0l \
           --file Dockerfile \
-          --tag ${{ env.REGISTRY }}/${{ github.repository }}:${{ matrix.arch }}-latest \
+          --tag ${{ env.REGISTRY }}/${{ github.repository }}:${{ matrix.arch }} \
           --platform linux/${{ matrix.arch }} \
           --build-arg ARCH=${{ matrix.arch }} \
           --cache-from type=gha,scope=build-${{ matrix.arch }} \
           --cache-to type=gha,mode=max,scope=build-${{ matrix.arch }} \
-          --push
+          --load
+        if [ "${{ github.ref }}" == "refs/heads/main" ]; then
+          docker tag ${{ env.REGISTRY }}/${{ github.repository }}:${{ matrix.arch }} ${{ env.REGISTRY }}/${{ github.repository }}:${{ matrix.arch }}-latest
+          docker push ${{ env.REGISTRY }}/${{ github.repository }}:${{ matrix.arch }}-latest
+        fi
       env:
        DEPOT_TOKEN: ${{ secrets.DEPOT_API_TOKEN }}
 
   manifest:
-      name: Create and Push Multi-Architecture Manifest
-      runs-on: ubuntu-latest
-      needs: build
-      steps:
-        - name: Setup Docker Buildx
-          uses: docker/setup-buildx-action@v1
-        - name: Install jq
-          run: sudo apt-get install -y jq
-        - name: Login to Docker Registry
-          uses: docker/login-action@v2
-          with:
-            registry: ${{ env.REGISTRY }}
-            username: ${{ github.actor }}
-            password: ${{ secrets.GITHUB_TOKEN }}
-        - name: Pull Architecture-Specific Images
-          run: |
-              docker pull --platform linux/amd64 ${{ env.REGISTRY }}/${{ github.repository }}:amd64-latest
-              docker pull --platform linux/arm64 ${{ env.REGISTRY }}/${{ github.repository }}:arm64-latest
-        - name: Extract Digests from Manifests
-          run: |
-              AMD64_DIGEST=$(docker manifest inspect ${{ env.REGISTRY }}/${{ github.repository }}:amd64-latest | jq -r '.manifests[] | select(.platform.architecture == "amd64") | .digest')
-              ARM64_DIGEST=$(docker manifest inspect ${{ env.REGISTRY }}/${{ github.repository }}:arm64-latest | jq -r '.manifests[] | select(.platform.architecture == "arm64") | .digest')
+    name: Create and Push Multi-Architecture Manifest
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v1
+      - name: Install jq
+        run: sudo apt-get install -y jq
+      - name: Login to Docker Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create and Push Docker Manifest
+        if: ${{ github.ref == 'refs/heads/main' }}
+        run: |
+          docker pull --platform linux/amd64 ${{ env.REGISTRY }}/${{ github.repository }}:amd64
+          docker pull --platform linux/arm64 ${{ env.REGISTRY }}/${{ github.repository }}:arm64
 
-              echo "AMD64 Digest: $AMD64_DIGEST"
-              echo "ARM64 Digest: $ARM64_DIGEST"
+          docker manifest create ${{ env.REGISTRY }}/${{ github.repository }}:latest \
+            --amend ${{ env.REGISTRY }}/${{ github.repository }}:amd64 \
+            --amend ${{ env.REGISTRY }}/${{ github.repository }}:arm64
 
-              echo "AMD64_DIGEST=${AMD64_DIGEST}" >> $GITHUB_ENV
-              echo "ARM64_DIGEST=${ARM64_DIGEST}" >> $GITHUB_ENV
-        - name: Create and Push Docker Manifest
-          run: |
-            docker manifest create ${{ env.REGISTRY }}/${{ github.repository }}:latest \
-              ${{ env.REGISTRY }}/${{ github.repository }}@${{ env.AMD64_DIGEST }} \
-              ${{ env.REGISTRY }}/${{ github.repository }}@${{ env.ARM64_DIGEST }}
+          docker manifest annotate ${{ env.REGISTRY }}/${{ github.repository }}:latest ${{ env.REGISTRY }}/${{ github.repository }}:amd64 --arch amd64
+          docker manifest annotate ${{ env.REGISTRY }}/${{ github.repository }}:latest ${{ env.REGISTRY }}/${{ github.repository }}:arm64 --arch arm64
 
-            docker manifest annotate ${{ env.REGISTRY }}/${{ github.repository }}:latest ${{ env.REGISTRY }}/${{ github.repository }}@${{ env.AMD64_DIGEST }} --arch amd64
-            docker manifest annotate ${{ env.REGISTRY }}/${{ github.repository }}:latest ${{ env.REGISTRY }}/${{ github.repository }}@${{ env.ARM64_DIGEST }} --arch arm64
-
-            docker manifest push ${{ env.REGISTRY }}/${{ github.repository }}:latest
-      env:
+          docker manifest push ${{ env.REGISTRY }}/${{ github.repository }}:latest
+    env:
        DOCKER_CLI_EXPERIMENTAL: enabled
