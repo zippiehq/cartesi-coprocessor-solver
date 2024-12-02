@@ -4,14 +4,14 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-eigen-types = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "5e24a28e5f8de753e856ca4d11c9c63e3a08e315"}
-eigen-services-blsaggregation = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "5e24a28e5f8de753e856ca4d11c9c63e3a08e315"}
-eigen-services-avsregistry = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "5e24a28e5f8de753e856ca4d11c9c63e3a08e315"}
-eigen-client-avsregistry = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "5e24a28e5f8de753e856ca4d11c9c63e3a08e315"}
-eigen-crypto-bls = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "5e24a28e5f8de753e856ca4d11c9c63e3a08e315"}
-eigen-logging = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "5e24a28e5f8de753e856ca4d11c9c63e3a08e315"}
-eigen-utils = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "5e24a28e5f8de753e856ca4d11c9c63e3a08e315"}
-eigen-services-operatorsinfo = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "5e24a28e5f8de753e856ca4d11c9c63e3a08e315"}
+eigen-types = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "0b727925b2b07e0a49d17ee90a0647e27380ab74"}
+eigen-services-blsaggregation = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "0b727925b2b07e0a49d17ee90a0647e27380ab74"}
+eigen-services-avsregistry = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "0b727925b2b07e0a49d17ee90a0647e27380ab74"}
+eigen-client-avsregistry = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "0b727925b2b07e0a49d17ee90a0647e27380ab74"}
+eigen-crypto-bls = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "0b727925b2b07e0a49d17ee90a0647e27380ab74"}
+eigen-logging = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "0b727925b2b07e0a49d17ee90a0647e27380ab74"}
+eigen-utils = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "0b727925b2b07e0a49d17ee90a0647e27380ab74"}
+eigen-services-operatorsinfo = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "0b727925b2b07e0a49d17ee90a0647e27380ab74"}
 alloy-signer-local = { version = "0.5.3", features = ["mnemonic"]}
 coins-bip39 = "0.12.0"
 alloy-network = "0.5.3"
