@@ -493,9 +493,19 @@ async fn main() {
     println!("Finished OperatorSocketUpdate querying");
 
     //Subscriber which inserts new tasks into the DB
-    subscribe_task_issued(
+    subscribe_task_issued_l1(
         config.l1_ws_endpoint.clone(),
         config.l1_http_endpoint.clone(),
+        config.payment_token.clone(),
+        config.task_issuer.clone(),
+        pool.clone(),
+        config.secret_key.clone(),
+        config.payment_phrase.clone(),
+    );
+
+    subscribe_task_issued_l2(
+        config.l2_ws_endpoint.clone(),
+        config.l2_http_endpoint.clone(),
         config.payment_token.clone(),
         config.task_issuer.clone(),
         pool.clone(),
@@ -1157,9 +1167,9 @@ fn new_task_issued_handler_l2(
     });
 }
 
-fn subscribe_task_issued(
-    ws_endpoint: String,
-    http_endpoint: String,
+fn subscribe_task_issued_l1(
+    l1_ws_endpoint: String,
+    l1_http_endpoint: String,
     payment_token: Address,
     task_issuer: Address,
     pool: Pool<PostgresConnectionManager<NoTls>>,
@@ -1170,7 +1180,7 @@ fn subscribe_task_issued(
         async move {
             let client = pool.get().await.unwrap();
             println!("Started TaskIssued subscription");
-            let ws_connect = alloy_provider::WsConnect::new(ws_endpoint);
+            let ws_connect = alloy_provider::WsConnect::new(l1_ws_endpoint);
             let ws_provider = alloy_provider::ProviderBuilder::new()
                 .on_ws(ws_connect)
                 .await
@@ -1196,7 +1206,7 @@ fn subscribe_task_issued(
                 let provider = ProviderBuilder::new()
                     .with_recommended_fillers()
                     .wallet(wallet)
-                    .on_http(http_endpoint.parse().unwrap());
+                    .on_http(l1_http_endpoint.parse().unwrap());
                 let contract = IERC20::new(payment_token, &provider);
                 let balance_caller = contract.balanceOf(generated_address);
                 match balance_caller.call().await {
@@ -1230,6 +1240,108 @@ fn subscribe_task_issued(
             }
         }
     });
+}
+
+fn subscribe_task_issued_l2(
+    l2_ws_endpoint: String,
+    l2_http_endpoint: String,
+    payment_token: Address,
+    l2_coprocessor_address: Address,
+    pool: Pool<PostgresConnectionManager<NoTls>>,
+    secret_key: String,
+    payment_phrase: String,
+) {
+    task::spawn({
+                    async move {
+                        let client = pool.get().await.unwrap();
+                        println!("Started TaskIssued subscription on L2");
+
+                        let ws_connect = alloy_provider::WsConnect::new(l2_ws_endpoint);
+                        let ws_provider = alloy_provider::ProviderBuilder::new()
+                            .on_ws(ws_connect)
+                            .await
+                            .unwrap();
+
+                        let event_filter = Filter::new().address(l2_coprocessor_address);
+
+                        let event: Event<_, _, ICoprocessor::TaskIssued, _> =
+                            Event::new(ws_provider.clone(), event_filter);
+
+                        let mut subscription = event.subscribe().await.unwrap();
+                        let mut stream = subscription.into_stream();
+
+                        while let Some(result) = stream.next().await {
+                            match result {
+                                Ok((stream_event, _)) => {
+                                    println!("New TaskIssued event on L2: {:?}", stream_event);
+
+                                    let generated_address = generate_eth_address(
+                                        pool.clone(),
+                                        stream_event.machineHash,
+                                        payment_phrase.clone(),
+                                    )
+                                        .await;
+
+                                    let decoded_secret_key =
+                                        SecretKey::from_slice(&hex::decode(secret_key.clone()).unwrap())
+                                            .unwrap();
+                                    let signer = PrivateKeySigner::from(decoded_secret_key);
+                                    let wallet = EthereumWallet::from(signer);
+                                    let provider = ProviderBuilder::new()
+                                        .with_recommended_fillers()
+                                        .wallet(wallet)
+                                        .on_http(l2_http_endpoint.parse().unwrap());
+
+                                    let contract = IERC20::new(payment_token, &provider);
+
+                                    let balance_caller = contract.balanceOf(generated_address);
+                                    match balance_caller.call().await {
+                                        Ok(balance) => {
+                                            println!(
+                                                "Balance of {:?} = {:?}",
+                                                generated_address, balance
+                                            );
+                                        }
+                                        Err(err) => {
+                                            println!("Failed to fetch balance: {:?}", err);
+                                        }
+                                    }
+
+                                    match client
+                                        .execute(
+                                            "INSERT INTO issued_tasks (machineHash, input, callback, status) VALUES ($1, $2, $3, $4::task_status)",
+                                            &[
+                                                &stream_event.machineHash.0.to_vec(),
+                                                &stream_event.input.0.to_vec(),
+                                                &stream_event.callback.0.to_vec(),
+                                                &task_status::waits_for_handling,
+                                            ],
+                                        )
+                                        .await
+                                    {
+                                        Ok(_) => {
+                                            client
+                                                .batch_execute(
+                                                    "
+                                        NOTIFY new_task_issued;
+                                        ",
+                                                )
+                                                .await
+                                                .unwrap();
+                                            println!("Inserted new task into the database and notified.");
+                                        }
+                                        Err(err) => {
+                                            eprintln!("Failed to insert task into database: {:?}", err);
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    eprintln!("Error in event stream: {:?}", err);
+                                }
+                            }
+                        }
+                    }
+                });
 }
 
 fn subscribe_operator_socket_update(
