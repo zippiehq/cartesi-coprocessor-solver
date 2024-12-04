@@ -1141,6 +1141,16 @@ fn new_task_issued_handler_l2(
                                             )
                                             .await
                                             .unwrap();
+                                        let l2_provider = Arc::new(Provider::<Http>::try_from(l2_http_endpoint.clone()).unwrap());
+                                        let message = Bytes::from("Message to L1");
+                                        match send_message_to_l1(l2_provider, l1_contract_address, message, &l1_private_key).await {
+                                            Ok(tx_hash) => {
+                                                println!("Message sent to L1 with tx hash: {:?}", tx_hash);
+                                            }
+                                            Err(err) => {
+                                                println!("Failed to send L1 transaction: {err}");
+                                            }
+                                        }
                                     }
                                     Err(err) => {
                                         println!("Failed to send L2 transaction: {err}");
@@ -1241,7 +1251,21 @@ fn subscribe_task_issued_l1(
         }
     });
 }
+async fn send_message_to_l1(
+    l2_provider: Arc<Provider<Http>>,
+    l1_contract_address: Address,
+    message: Bytes,
+    private_key: &str,
+) -> Result<TxHash, Box<dyn std::error::Error>> {
+    let wallet: LocalWallet = private_key.parse()?;
+    let client = SignerMiddleware::new(l2_provider, wallet);
+    let contract = Contract::new(l1_contract_address, include_bytes!("../path/to/L1Contract.abi"), client);
 
+    let tx = contract.method::<_, H256>("sendMessage", message)?;
+    let pending_tx = tx.send().await?;
+    let receipt = pending_tx.await?;
+    Ok(receipt.transaction_hash)
+}
 fn subscribe_task_issued_l2(
     l2_ws_endpoint: String,
     l2_http_endpoint: String,
