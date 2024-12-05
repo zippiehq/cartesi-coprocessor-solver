@@ -1,6 +1,6 @@
 use alloy::signers::k256::SecretKey;
 use alloy_contract::Event;
-use alloy_primitives::{keccak256, Address, FixedBytes, Keccak256, B256};
+use alloy_primitives::{keccak256, Address, FixedBytes, Keccak256, TxHash, B256};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types_eth::Filter;
 use alloy_signer_local::{MnemonicBuilder, PrivateKeySigner};
@@ -27,12 +27,12 @@ use eigen_utils::{
 use futures_util::FutureExt;
 use futures_util::{StreamExt, TryStreamExt};
 use hex::FromHex;
-use hyper::{
-    service::{make_service_fn, service_fn},
-    Body, Client, Request, Response, Server, StatusCode,
-};
+use hyper::{service::{make_service_fn, service_fn}, Body, Client, Request, Response, Server, StatusCode, Uri};
 use serde::Deserialize;
 use std::{collections::HashMap, convert::Infallible, net::SocketAddr, sync::Arc, time::Duration};
+use std::error::Error;
+use std::io::Bytes;
+use std::str::FromStr;
 use tokio::{
     sync::Mutex,
     task::{self, JoinHandle},
@@ -54,6 +54,7 @@ struct Config {
     l2_http_endpoint: String,
     l2_ws_endpoint: String,
     l2_coprocessor_address: String,
+    l1_coprocessor_address: String,
     registry_coordinator_address: Address,
     operator_state_retriever_address: Address,
     current_first_block: u64,
@@ -546,6 +547,11 @@ async fn main() {
         sockets_map.clone(),
         config.registry_coordinator_address,
         current_last_block.clone(),
+    );
+    subscribe_messages_from_l1(
+        config.l1_ws_endpoint.clone(),
+        Address::from_str(&config.l1_coprocessor_address).unwrap(),
+        pool.clone(),
     );
     server.await.unwrap();
 }
@@ -1078,10 +1084,14 @@ fn new_task_issued_handler_l2(
                                     .await
                                     .unwrap();
 
-                                let secret_key = SecretKey::from_slice(
-                                    &hex::decode(secret_key.clone()).unwrap(),
-                                )
-                                    .unwrap();
+                                let secret_key_str: String = secret_key.clone();
+                                let secret_key = SecretKey::from_slice(&hex::decode(secret_key_str).unwrap()).unwrap();
+                                let response = ResponseSol {
+                                    ruleSet: Address::parse_checksummed(format!("0x{}", ruleset.clone()), None).unwrap(),
+                                    machineHash: task_issued.machineHash,
+                                    payloadHash: keccak256(&task_issued.input),
+                                    outputMerkle: outputs_merkle::create_proofs(vec![], HEIGHT).unwrap().0,
+                                };
                                 let signer = PrivateKeySigner::from(secret_key);
                                 let wallet = EthereumWallet::from(signer);
                                 let provider = ProviderBuilder::new()
@@ -1141,9 +1151,20 @@ fn new_task_issued_handler_l2(
                                             )
                                             .await
                                             .unwrap();
-                                        let l2_provider = Arc::new(Provider::<Http>::try_from(l2_http_endpoint.clone()).unwrap());
-                                        let message = Bytes::from("Message to L1");
-                                        match send_message_to_l1(l2_provider, l1_contract_address, message, &l1_private_key).await {
+                                        match send_message_to_l1(
+                                            l2_http_endpoint.clone(),
+                                            Address::parse_checksummed(l2_coprocessor_address.clone(), None).unwrap(),
+                                            secret_key.clone(),
+                                            response,
+                                            quorum_nums.into(),
+                                            100,
+                                            100,
+                                            current_block_num as u32,
+                                            non_signer_stakes_and_signature_response.clone(),
+                                            task_issued.callback,
+                                            outputs.clone(),
+                                        )
+                                            .await {
                                             Ok(tx_hash) => {
                                                 println!("Message sent to L1 with tx hash: {:?}", tx_hash);
                                             }
@@ -1251,20 +1272,116 @@ fn subscribe_task_issued_l1(
         }
     });
 }
-async fn send_message_to_l1(
-    l2_provider: Arc<Provider<Http>>,
-    l1_contract_address: Address,
-    message: Bytes,
-    private_key: &str,
-) -> Result<TxHash, Box<dyn std::error::Error>> {
-    let wallet: LocalWallet = private_key.parse()?;
-    let client = SignerMiddleware::new(l2_provider, wallet);
-    let contract = Contract::new(l1_contract_address, include_bytes!("../path/to/L1Contract.abi"), client);
+async fn send_message_to_l1<>(
+    l2_http_endpoint: String,
+    l1_coprocessor_address: Address,
+    secret_key: String,
+    resp: ResponseSol,
+    quorum_numbers: Vec<u8>,
+    quorum_threshold_percentage: u32,
+    threshold_denominator: u8,
+    block_number: u32,
+    non_signer_stakes_and_signature_response: NonSignerStakesAndSignature,
+    callback_address: Address,
+    outputs: Vec<alloy_primitives::Bytes>,
+) -> Result<TxHash, Box<dyn Error>> {
+    let decoded_secret_key = SecretKey::from_slice(&hex::decode(secret_key)?)
+        .map_err(|e| format!("Invalid secret key: {:?}", e))?;
+    let signer = PrivateKeySigner::from(decoded_secret_key);
+    let wallet = EthereumWallet::from(signer);
 
-    let tx = contract.method::<_, H256>("sendMessage", message)?;
-    let pending_tx = tx.send().await?;
-    let receipt = pending_tx.await?;
-    Ok(receipt.transaction_hash)
+    let provider = ProviderBuilder::new()
+        .with_recommended_fillers()
+        .wallet(wallet)
+        .on_http(l2_http_endpoint.parse().unwrap());
+
+    let l1_coprocessor = ResponseCallbackContract::new(l1_coprocessor_address, &provider);
+
+    let pending_tx = l1_coprocessor
+        .solverCallbackOutputsOnly(
+            resp,
+            quorum_numbers.into(),
+            quorum_threshold_percentage,
+            threshold_denominator,
+            block_number,
+            non_signer_stakes_and_signature_response.into(),
+            callback_address,
+            outputs.into(),
+        )
+        .send()
+        .await?;
+
+    let receipt = pending_tx;
+    Ok(*receipt.tx_hash())
+}
+
+fn subscribe_messages_from_l1(
+    l1_ws_endpoint: String,
+    l1_coprocessor_address: Address,
+    pool: Pool<PostgresConnectionManager<NoTls>>,
+) {
+    task::spawn({
+        async move {
+            let client = pool.get().await.unwrap();
+            println!("Started MessageReceived subscription on L1");
+
+            let ws_connect = alloy_provider::WsConnect::new(l1_ws_endpoint.clone());
+            let ws_provider = alloy_provider::ProviderBuilder::new()
+                .on_ws(ws_connect)
+                .await
+                .unwrap();
+
+            let event_filter = Filter::new().address(l1_coprocessor_address);
+
+            let event: Event<_, _, L1Coprocessor::MessageReceived, _> =
+                Event::new(ws_provider.clone(), event_filter);
+
+            let mut subscription = event.subscribe().await.unwrap();
+            let mut stream = subscription.into_stream();
+
+            while let Some(result) = stream.next().await {
+                match result {
+                    Ok((stream_event, _)) => {
+                        println!("New MessageReceived event on L1: {:?}", stream_event);
+
+                        let response_hash = stream_event.responseHash;
+                        let sender = stream_event.sender;
+                        let data = stream_event.data;
+
+                        match client
+                            .execute(
+                                "INSERT INTO l1_messages (responseHash, sender, data) VALUES ($1, $2, $3)",
+                                &[
+                                    &response_hash.0.to_vec(),
+                                    &sender.0.to_vec(),
+                                    &data.0.to_vec(),
+                                ],
+                            )
+                            .await
+                        {
+                            Ok(_) => {
+                                client
+                                    .batch_execute(
+                                        "
+                                        NOTIFY new_l1_message;
+                                        ",
+                                    )
+                                    .await
+                                    .unwrap();
+                                println!("Inserted new L1 message into the database and notified.");
+                            }
+                            Err(err) => {
+                                eprintln!("Failed to insert L1 message into database: {:?}", err);
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!("Error in L1 event stream: {:?}", err);
+                    }
+                }
+            }
+        }
+    });
 }
 fn subscribe_task_issued_l2(
     l2_ws_endpoint: String,
@@ -1498,6 +1615,12 @@ fn agg_response_to_non_signer_stakes_and_signature(
         quorumApkIndices: agg_response.quorum_apk_indices,
         totalStakeIndices: agg_response.total_stake_indices,
         nonSignerStakeIndices: agg_response.non_signer_stake_indices,
+    }
+}
+sol! {
+    interface L1Coprocessor {
+        #[derive(Debug)]
+        event MessageReceived(bytes32 responseHash, address sender, bytes data);
     }
 }
 sol!(
