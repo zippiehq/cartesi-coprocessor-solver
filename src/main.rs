@@ -1298,8 +1298,8 @@ async fn send_message_to_l1<>(
     let l1_coprocessor = ResponseCallbackContract::new(l1_coprocessor_address, &provider);
 
     let pending_tx = l1_coprocessor
-        .solverCallbackOutputsOnly(
-            resp,
+        .solverCallbackSendToL2(
+            response,
             quorum_numbers.into(),
             quorum_threshold_percentage,
             threshold_denominator,
@@ -1617,12 +1617,24 @@ fn agg_response_to_non_signer_stakes_and_signature(
         nonSignerStakeIndices: agg_response.non_signer_stake_indices,
     }
 }
-sol! {
-    interface L1Coprocessor {
-        #[derive(Debug)]
-        event MessageReceived(bytes32 responseHash, address sender, bytes data);
+sol!(
+    #[sol(rpc)]
+    contract L1Coprocessor {
+        constructor(address _crossDomainMessenger, IRegistryCoordinator _registryCoordinator) {}
+
+        function setL2Coprocessor(address _l2Coprocessor) external;
+
+        function solverCallbackSendToL2(
+            Response calldata resp,
+            bytes calldata quorumNumbers,
+            uint32 quorumThresholdPercentage,
+            uint8 thresholdDenominator,
+            uint32 blockNumber,
+            NonSignerStakesAndSignature memory nonSignerStakesAndSignature,
+            uint32 gasLimit
+        ) external;
     }
-}
+);
 sol!(
    interface ICoprocessor {
         #[derive(Debug)]
