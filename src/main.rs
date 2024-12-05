@@ -1162,7 +1162,6 @@ fn new_task_issued_handler_l2(
                                             current_block_num as u32,
                                             non_signer_stakes_and_signature_response.clone(),
                                             task_issued.callback,
-                                            outputs.clone(),
                                         )
                                             .await {
                                             Ok(tx_hash) => {
@@ -1283,7 +1282,6 @@ async fn send_message_to_l1<>(
     block_number: u32,
     non_signer_stakes_and_signature_response: NonSignerStakesAndSignature,
     callback_address: Address,
-    outputs: Vec<alloy_primitives::Bytes>,
 ) -> Result<TxHash, Box<dyn Error>> {
     let decoded_secret_key = SecretKey::from_slice(&hex::decode(secret_key)?)
         .map_err(|e| format!("Invalid secret key: {:?}", e))?;
@@ -1295,18 +1293,17 @@ async fn send_message_to_l1<>(
         .wallet(wallet)
         .on_http(l2_http_endpoint.parse().unwrap());
 
-    let l1_coprocessor = ResponseCallbackContract::new(l1_coprocessor_address, &provider);
+    let L1Coprocessor = ResponseCallbackContract::new(l1_coprocessor_address, &provider);
 
-    let pending_tx = l1_coprocessor
+    let pending_tx = L1Coprocessor
         .solverCallbackSendToL2(
-            response,
+            resp,
             quorum_numbers.into(),
             quorum_threshold_percentage,
             threshold_denominator,
             block_number,
             non_signer_stakes_and_signature_response.into(),
             callback_address,
-            outputs.into(),
         )
         .send()
         .await?;
