@@ -1,7 +1,7 @@
 use alloy::signers::k256::SecretKey;
 use alloy_contract::Event;
-use alloy_primitives::{keccak256, Address, FixedBytes, Keccak256, B256};
-use alloy_provider::{Provider, ProviderBuilder};
+use alloy_primitives::{keccak256, Address, FixedBytes, Keccak256, TxHash, B256};
+use alloy_provider::{Identity, Provider, ProviderBuilder, ReqwestProvider};
 use alloy_rpc_types_eth::Filter;
 use alloy_signer_local::{MnemonicBuilder, PrivateKeySigner};
 use alloy_sol_types::sol;
@@ -27,12 +27,12 @@ use eigen_utils::{
 use futures_util::FutureExt;
 use futures_util::{StreamExt, TryStreamExt};
 use hex::FromHex;
-use hyper::{
-    service::{make_service_fn, service_fn},
-    Body, Client, Request, Response, Server, StatusCode,
-};
+use hyper::{service::{make_service_fn, service_fn}, Body, Client, Request, Response, Server, StatusCode, Uri};
 use serde::Deserialize;
-use std::{collections::HashMap, convert::Infallible, net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::HashMap, convert::Infallible, fmt, net::SocketAddr, sync::Arc, time::Duration};
+use std::error::Error;
+use std::io::Bytes;
+use std::str::FromStr;
 use tokio::{
     sync::Mutex,
     task::{self, JoinHandle},
@@ -42,15 +42,20 @@ use tokio_util::sync::CancellationToken;
 use ICoprocessor::TaskIssued;
 mod outputs_merkle;
 use alloy_network::EthereumWallet;
+use alloy_provider::fillers::{BlobGasFiller, ChainIdFiller, FillProvider, GasFiller, JoinFill, NonceFiller, WalletFiller};
 use futures_util::stream;
 use tokio_postgres::types::{FromSql, ToSql};
 
 const HEIGHT: usize = 63;
 const TASK_INDEX: u32 = 1;
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct Config {
-    http_endpoint: String,
-    ws_endpoint: String,
+    l1_http_endpoint: String,
+    l1_ws_endpoint: String,
+    l2_http_endpoint: String,
+    l2_ws_endpoint: String,
+    l2_coprocessor_address: String,
+    l1_coprocessor_address: String,
     registry_coordinator_address: Address,
     operator_state_retriever_address: Address,
     current_first_block: u64,
@@ -118,7 +123,7 @@ async fn main() {
         .batch_execute("CREATE TABLE IF NOT EXISTS machine_hashes (id SERIAL PRIMARY KEY, machine_hash BYTEA UNIQUE)").await.unwrap();
 
     println!("Starting solver..");
-    let arc_ws_endpoint = Arc::new(config.ws_endpoint.clone());
+    let arc_ws_endpoint = Arc::new(config.l1_ws_endpoint.clone());
 
     let tracing_logger =
         TracingLogger::new_text_logger(false, String::from(""), LogLevel::Debug, false);
@@ -126,7 +131,7 @@ async fn main() {
         tracing_logger.clone(),
         config.registry_coordinator_address,
         config.operator_state_retriever_address,
-        config.http_endpoint.clone(),
+        config.l1_http_endpoint.clone(),
     )
     .await
     .unwrap();
@@ -134,7 +139,7 @@ async fn main() {
     let operators_info = OperatorInfoServiceInMemory::new(
         tracing_logger.clone(),
         avs_registry_reader.clone(),
-        config.ws_endpoint.clone(),
+        config.l1_ws_endpoint.clone(),
     )
     .await;
     let avs_registry_service =
@@ -144,7 +149,7 @@ async fn main() {
     let operators_info_clone = Arc::new(operators_info.clone());
     let token_clone = cancellation_token.clone();
     let provider =
-        alloy_provider::ProviderBuilder::new().on_http(config.http_endpoint.parse().unwrap());
+        alloy_provider::ProviderBuilder::new().on_http(config.l1_http_endpoint.parse().unwrap());
     let current_block_num = provider.get_block_number().await.unwrap();
     println!("current_block_num {:?}", current_block_num);
 
@@ -162,7 +167,7 @@ async fn main() {
     let sockets_map: Arc<Mutex<HashMap<Vec<u8>, String>>> = Arc::new(Mutex::new(HashMap::new()));
     let current_last_block = Arc::new(Mutex::new(config.current_first_block));
     let querying_thread = query_operator_socket_update(
-        config.ws_endpoint.clone(),
+        config.l1_ws_endpoint.clone(),
         sockets_map.clone(),
         config.current_first_block,
         current_last_block.clone(),
@@ -173,8 +178,8 @@ async fn main() {
     let addr: SocketAddr = ([0, 0, 0, 0], 3034).into();
     let service = make_service_fn(|_| {
         let avs_registry_service = avs_registry_service.clone();
-        let ws_endpoint = config.ws_endpoint.clone();
-        let http_endpoint = config.http_endpoint.clone();
+        let ws_endpoint = config.l1_ws_endpoint.clone();
+        let http_endpoint = config.l1_http_endpoint.clone();
 
         let config_socket = config.socket.clone();
         let pool = pool.clone();
@@ -490,24 +495,48 @@ async fn main() {
     println!("Finished OperatorSocketUpdate querying");
 
     //Subscriber which inserts new tasks into the DB
-    subscribe_task_issued(
-        config.ws_endpoint.clone(),
-        config.http_endpoint.clone(),
+    subscribe_task_issued_l1(
+        config.l1_ws_endpoint.clone(),
+        config.l1_http_endpoint.clone(),
         config.payment_token.clone(),
         config.task_issuer.clone(),
         pool.clone(),
         config.secret_key.clone(),
         config.payment_phrase.clone(),
+    );
 
+    subscribe_task_issued_l2(
+        config.l2_ws_endpoint.clone(),
+        config.l2_http_endpoint.clone(),
+        config.payment_token.clone(),
+        config.task_issuer.clone(),
+        pool.clone(),
+        config.secret_key.clone(),
+        config.payment_phrase.clone(),
     );
     //Subscriber which handles new tasks received from DB
-    new_task_issued_handler(
-        config.ws_endpoint.clone(),
-        config.http_endpoint.clone(),
+    new_task_issued_handler_l1(
+        config.l1_ws_endpoint.clone(),
+        config.l1_http_endpoint.clone(),
         avs_registry_service.clone(),
         sockets_map.clone(),
         config.socket.clone(),
-        config.ruleset,
+        config.ruleset.clone(),
+        current_block_num,
+        config.secret_key.clone(),
+        config.task_issuer,
+        pool.clone(),
+        config.postgre_connect_request.clone(),
+    );
+
+    new_task_issued_handler_l2(
+        config.l2_ws_endpoint.clone(),
+        config.l2_http_endpoint.clone(),
+        config.l2_coprocessor_address.clone(),
+        avs_registry_service.clone(),
+        sockets_map.clone(),
+        config.socket.clone(),
+        config.ruleset.clone(),
         current_block_num,
         config.secret_key.clone(),
         config.task_issuer,
@@ -519,6 +548,11 @@ async fn main() {
         sockets_map.clone(),
         config.registry_coordinator_address,
         current_last_block.clone(),
+    );
+    subscribe_messages_from_l1(
+        config.l1_ws_endpoint.clone(),
+        Address::from_str(&config.l1_coprocessor_address).unwrap(),
+        pool.clone(),
     );
     server.await.unwrap();
 }
@@ -766,9 +800,9 @@ fn extract_number_array(values: Vec<serde_json::Value>) -> Vec<u8> {
     byte_vec
 }
 
-fn new_task_issued_handler(
-    ws_endpoint: String,
-    http_endpoint: String,
+fn new_task_issued_handler_l1(
+    l1_ws_endpoint: String,
+    l1_http_endpoint: String,
     avs_registry_service: AvsRegistryServiceChainCaller<
         AvsRegistryChainReader,
         OperatorInfoServiceInMemory,
@@ -785,7 +819,7 @@ fn new_task_issued_handler(
     task::spawn({
         async move {
             let client = pool.get().await.unwrap();
-            let ws_connect = alloy_provider::WsConnect::new(ws_endpoint);
+            let ws_connect = alloy_provider::WsConnect::new(l1_ws_endpoint);
             let ws_provider = alloy_provider::ProviderBuilder::new()
                 .on_ws(ws_connect)
                 .await
@@ -862,7 +896,7 @@ fn new_task_issued_handler(
                                 let provider = ProviderBuilder::new()
                                     .with_recommended_fillers()
                                     .wallet(wallet)
-                                    .on_http(http_endpoint.parse().unwrap());
+                                    .on_http(l1_http_endpoint.parse().unwrap());
                                 let contract =
                                     ResponseCallbackContract::new(task_issuer, &provider);
                                 let non_signer_stakes_and_signature_response =
@@ -903,7 +937,7 @@ fn new_task_issued_handler(
                                     task_issued.callback,
                                     outputs,
                                 );
-                                let root_provider = get_provider(http_endpoint.as_str());
+                                let root_provider = get_provider(l1_http_endpoint.as_str());
                                 let service_manager =
                                     IBLSSignatureChecker::new(task_issuer, root_provider);
                                 let check_signatures_result = service_manager
@@ -958,9 +992,216 @@ fn new_task_issued_handler(
     });
 }
 
-fn subscribe_task_issued(
-    ws_endpoint: String,
-    http_endpoint: String,
+fn new_task_issued_handler_l2(
+    l2_ws_endpoint: String,
+    l2_http_endpoint: String,
+    l2_coprocessor_address: String,
+    avs_registry_service: AvsRegistryServiceChainCaller<
+        AvsRegistryChainReader,
+        OperatorInfoServiceInMemory,
+    >,
+    sockets_map: Arc<Mutex<HashMap<Vec<u8>, String>>>,
+    config_socket: String,
+    ruleset: String,
+    current_block_num: u64,
+    secret_key: String,
+    task_issuer: Address,
+    pool: Pool<PostgresConnectionManager<NoTls>>,
+    postgre_connect_request: String,
+) {
+    task::spawn({
+        async move {
+            let client = pool.get().await.unwrap();
+            let l2_ws_connect = alloy_provider::WsConnect::new(l2_ws_endpoint.clone());
+            let l2_ws_provider = alloy_provider::ProviderBuilder::new()
+                .on_ws(l2_ws_connect)
+                .await
+                .unwrap();
+            let quorum_nums = [0];
+            let quorum_threshold_percentages = vec![100_u8];
+            let time_to_expiry = Duration::from_secs(10);
+
+            let (notification_client, mut connection) =
+                tokio_postgres::connect(&postgre_connect_request, NoTls)
+                    .await
+                    .unwrap();
+            let (tx, rx) = futures_channel::mpsc::unbounded();
+            let stream =
+                stream::poll_fn(move |cx| connection.poll_message(cx)).map_err(|e| panic!("{}", e));
+            let connection = stream.forward(tx).map(|r| r.unwrap());
+            tokio::spawn(connection);
+            let mut notification_filter = rx.filter_map(|m| match m {
+                AsyncMessage::Notification(n) => futures_util::future::ready(Some(n)),
+                _ => futures_util::future::ready(None),
+            });
+
+            loop {
+                match client
+                    .query_one(
+                        "UPDATE issued_tasks SET status = $1 WHERE id = ( SELECT id FROM issued_tasks WHERE status = $2 ORDER BY id LIMIT 1) RETURNING *;",
+                        &[&task_status::in_progress, &task_status::waits_for_handling],
+                    )
+                    .await
+                {
+                    Ok(row) => {
+                        let id: i32 = row.get(0);
+                        let machine_hash: Vec<u8> = row.get(1);
+                        let input: Vec<u8> = row.get(2);
+                        let callback: Vec<u8> = row.get(3);
+
+                        let task_issued = TaskIssued {
+                            machineHash: B256::from_slice(&machine_hash),
+                            input: input.into(),
+                            callback: Address::from_slice(&callback),
+                        };
+
+                        let current_block_number = l2_ws_provider
+                            .clone()
+                            .get_block_number()
+                            .await
+                            .unwrap();
+
+                        match avs_registry_service
+                            .clone()
+                            .get_operators_avs_state_at_block(
+                                current_block_number as u32,
+                                &[0],
+                            )
+                            .await
+                        {
+                            Ok(operators) => {
+                                let bls_agg_response = handle_task_issued_operator(
+                                    operators,
+                                    false,
+                                    sockets_map.clone(),
+                                    config_socket.clone(),
+                                    task_issued.clone(),
+                                    avs_registry_service.clone(),
+                                    Duration::from_secs(10),
+                                    ruleset.clone(),
+                                    current_block_num,
+                                    quorum_nums.to_vec(),
+                                    quorum_threshold_percentages.clone(),
+                                )
+                                    .await
+                                    .unwrap();
+
+                                let secret_key_str: String = secret_key.clone();
+                                let secret_key = SecretKey::from_slice(&hex::decode(secret_key.clone()).unwrap()).unwrap();
+                                let response = ResponseSol {
+                                    ruleSet: Address::parse_checksummed(format!("0x{}", ruleset.clone()), None).unwrap(),
+                                    machineHash: task_issued.machineHash,
+                                    payloadHash: keccak256(&task_issued.input),
+                                    outputMerkle: outputs_merkle::create_proofs(vec![], HEIGHT).unwrap().0,
+                                };
+                                let signer = PrivateKeySigner::from(secret_key);
+                                let wallet = EthereumWallet::from(signer);
+                                let provider = ProviderBuilder::new()
+                                    .with_recommended_fillers()
+                                    .wallet(wallet)
+                                    .on_http(l2_http_endpoint.parse().unwrap());
+                                let non_signer_stakes_and_signature_response =
+                                    agg_response_to_non_signer_stakes_and_signature(
+                                        bls_agg_response.0.clone(),
+                                    );
+                                let outputs: Vec<alloy_primitives::Bytes> = bls_agg_response
+                                    .1
+                                    .get(&bls_agg_response.0.task_response_digest)
+                                    .unwrap()
+                                    .iter()
+                                    .map(|bytes| bytes.clone().1.into())
+                                    .collect();
+                                let contract = ResponseCallbackContract::new(
+                                    Address::parse_checksummed(l2_coprocessor_address.clone(), None).unwrap(),
+                                    &provider,
+                                );
+
+                                match contract
+                                    .solverCallbackOutputsOnly(
+                                        ResponseSol {
+                                            ruleSet: Address::parse_checksummed(
+                                                format!("0x{}", ruleset.clone()),
+                                                None,
+                                            )
+                                                .unwrap(),
+                                            machineHash: task_issued.machineHash,
+                                            payloadHash: keccak256(&task_issued.input),
+                                            outputMerkle: outputs_merkle::create_proofs(
+                                                vec![],
+                                                HEIGHT,
+                                            )
+                                                .unwrap()
+                                                .0,
+                                        },
+                                        quorum_nums.into(),
+                                        100,
+                                        100,
+                                        current_block_num as u32,
+                                        non_signer_stakes_and_signature_response.clone().into(),
+                                        task_issued.callback,
+                                        outputs,
+                                    )
+                                    .send()
+                                    .await
+                                {
+                                    Ok(_) => {
+                                        println!("Task successfully handled on L2!");
+                                        client
+                                            .execute(
+                                                "UPDATE issued_tasks SET status = $1 WHERE id = $2;",
+                                                &[&task_status::handled, &id],
+                                            )
+                                            .await
+                                            .unwrap();
+                                        match send_message_to_l1(
+                                            l2_http_endpoint.clone(),
+                                            Address::parse_checksummed(l2_coprocessor_address.clone(), None).unwrap(),
+                                            secret_key_str.clone(),
+                                            response,
+                                            quorum_nums.into(),
+                                            100,
+                                            100,
+                                            current_block_num as u32,
+                                            non_signer_stakes_and_signature_response.clone(),
+                                            100000,
+                                        )
+                                            .await {
+                                            Ok(tx_hash) => {
+                                                println!("Message sent to L1 with tx hash: {:?}", tx_hash);
+                                            }
+                                            Err(err) => {
+                                                println!("Failed to send L1 transaction: {err}");
+                                            }
+                                        }
+                                    }
+                                    Err(err) => {
+                                        println!("Failed to send L2 transaction: {err}");
+                                    }
+                                }
+                            }
+                            Err(e) => println!(
+                                "No operators found at block {:?}. Error {:?}",
+                                current_block_number, e
+                            ),
+                        }
+                    }
+                    Err(_) => {
+                        println!("Waiting for new L2 tasks...");
+                        notification_client
+                            .batch_execute("LISTEN new_task_issued;")
+                            .await
+                            .unwrap();
+                        notification_filter.next().await;
+                    }
+                }
+            }
+        }
+    });
+}
+
+fn subscribe_task_issued_l1(
+    l1_ws_endpoint: String,
+    l1_http_endpoint: String,
     payment_token: Address,
     task_issuer: Address,
     pool: Pool<PostgresConnectionManager<NoTls>>,
@@ -971,7 +1212,7 @@ fn subscribe_task_issued(
         async move {
             let client = pool.get().await.unwrap();
             println!("Started TaskIssued subscription");
-            let ws_connect = alloy_provider::WsConnect::new(ws_endpoint);
+            let ws_connect = alloy_provider::WsConnect::new(l1_ws_endpoint);
             let ws_provider = alloy_provider::ProviderBuilder::new()
                 .on_ws(ws_connect)
                 .await
@@ -997,7 +1238,7 @@ fn subscribe_task_issued(
                 let provider = ProviderBuilder::new()
                     .with_recommended_fillers()
                     .wallet(wallet)
-                    .on_http(http_endpoint.parse().unwrap());
+                    .on_http(l1_http_endpoint.parse().unwrap());
                 let contract = IERC20::new(payment_token, &provider);
                 let balance_caller = contract.balanceOf(generated_address);
                 match balance_caller.call().await {
@@ -1031,6 +1272,215 @@ fn subscribe_task_issued(
             }
         }
     });
+}
+async fn send_message_to_l1<>(
+    l1_http_endpoint: String,
+    l1_coprocessor_address: Address,
+    secret_key: String,
+    resp: ResponseSol,
+    quorum_numbers: Vec<u8>,
+    quorum_threshold_percentage: u32,
+    threshold_denominator: u8,
+    block_number: u32,
+    non_signer_stakes_and_signature_response: NonSignerStakesAndSignature,
+    gas_limit: u32,
+) -> Result<TxHash, Box<dyn Error>> {
+    let decoded_secret_key = SecretKey::from_slice(&hex::decode(secret_key)?)
+        .map_err(|e| format!("Invalid secret key: {:?}", e))?;
+    let signer = PrivateKeySigner::from(decoded_secret_key);
+    let wallet = EthereumWallet::from(signer);
+
+    let provider = ProviderBuilder::new()
+        .with_recommended_fillers()
+        .wallet(wallet)
+        .on_http(l1_http_endpoint.parse().unwrap());
+
+    let l1_coprocessor = L1Coprocessor::new(l1_coprocessor_address, &provider);
+
+    let pending_tx = l1_coprocessor
+        .solverCallbackSendToL2(
+            resp,
+            quorum_numbers.into(),
+            quorum_threshold_percentage,
+            threshold_denominator,
+            block_number,
+            non_signer_stakes_and_signature_response.into(),
+            gas_limit
+        )
+        .send()
+        .await?;
+
+    let receipt = pending_tx;
+    Ok(*receipt.tx_hash())
+}
+fn subscribe_messages_from_l1(
+    l1_ws_endpoint: String,
+    l1_coprocessor_address: Address,
+    pool: Pool<PostgresConnectionManager<NoTls>>,
+) {
+    task::spawn({
+        async move {
+            let client = pool.get().await.unwrap();
+            println!("Started MessageReceived subscription on L1");
+
+            let ws_connect = alloy_provider::WsConnect::new(l1_ws_endpoint.clone());
+            let ws_provider = alloy_provider::ProviderBuilder::new()
+                .on_ws(ws_connect)
+                .await
+                .unwrap();
+
+            let event_filter = Filter::new().address(l1_coprocessor_address);
+
+            let event: Event<_, _, L1Coprocessor::MessageReceived, _> =
+                Event::new(ws_provider.clone(), event_filter);
+
+            let mut subscription = event.subscribe().await.unwrap();
+            let mut stream = subscription.into_stream();
+
+            while let Some(result) = stream.next().await {
+                match result {
+                    Ok((stream_event, _)) => {
+                        println!("New MessageReceived event on L1: {:?}", stream_event);
+
+                        let response_hash = stream_event.responseHash;
+                        let sender = stream_event.sender;
+                        let data = stream_event.data;
+
+                        match client
+                            .execute(
+                                "INSERT INTO l1_messages (responseHash, sender, data) VALUES ($1, $2, $3)",
+                                &[
+                                    &response_hash.0.to_vec(),
+                                    &sender.0.to_vec(),
+                                    &data.0.to_vec(),
+                                ],
+                            )
+                            .await
+                        {
+                            Ok(_) => {
+                                client
+                                    .batch_execute(
+                                        "
+                                        NOTIFY new_l1_message;
+                                        ",
+                                    )
+                                    .await
+                                    .unwrap();
+                                println!("Inserted new L1 message into the database and notified.");
+                            }
+                            Err(err) => {
+                                eprintln!("Failed to insert L1 message into database: {:?}", err);
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!("Error in L1 event stream: {:?}", err);
+                    }
+                }
+            }
+        }
+    });
+}
+fn subscribe_task_issued_l2(
+    l2_ws_endpoint: String,
+    l2_http_endpoint: String,
+    payment_token: Address,
+    l2_coprocessor_address: Address,
+    pool: Pool<PostgresConnectionManager<NoTls>>,
+    secret_key: String,
+    payment_phrase: String,
+) {
+    task::spawn({
+                    async move {
+                        let client = pool.get().await.unwrap();
+                        println!("Started TaskIssued subscription on L2");
+
+                        let ws_connect = alloy_provider::WsConnect::new(l2_ws_endpoint);
+                        let ws_provider = alloy_provider::ProviderBuilder::new()
+                            .on_ws(ws_connect)
+                            .await
+                            .unwrap();
+
+                        let event_filter = Filter::new().address(l2_coprocessor_address);
+
+                        let event: Event<_, _, ICoprocessor::TaskIssued, _> =
+                            Event::new(ws_provider.clone(), event_filter);
+
+                        let mut subscription = event.subscribe().await.unwrap();
+                        let mut stream = subscription.into_stream();
+
+                        while let Some(result) = stream.next().await {
+                            match result {
+                                Ok((stream_event, _)) => {
+                                    println!("New TaskIssued event on L2: {:?}", stream_event);
+
+                                    let generated_address = generate_eth_address(
+                                        pool.clone(),
+                                        stream_event.machineHash,
+                                        payment_phrase.clone(),
+                                    )
+                                        .await;
+
+                                    let decoded_secret_key =
+                                        SecretKey::from_slice(&hex::decode(secret_key.clone()).unwrap())
+                                            .unwrap();
+                                    let signer = PrivateKeySigner::from(decoded_secret_key);
+                                    let wallet = EthereumWallet::from(signer);
+                                    let provider = ProviderBuilder::new()
+                                        .with_recommended_fillers()
+                                        .wallet(wallet)
+                                        .on_http(l2_http_endpoint.parse().unwrap());
+
+                                    let contract = IERC20::new(payment_token, &provider);
+
+                                    let balance_caller = contract.balanceOf(generated_address);
+                                    match balance_caller.call().await {
+                                        Ok(balance) => {
+                                            println!(
+                                                "Balance of {:?} = {:?}",
+                                                generated_address, balance
+                                            );
+                                        }
+                                        Err(err) => {
+                                            println!("Failed to fetch balance: {:?}", err);
+                                        }
+                                    }
+
+                                    match client
+                                        .execute(
+                                            "INSERT INTO issued_tasks (machineHash, input, callback, status) VALUES ($1, $2, $3, $4::task_status)",
+                                            &[
+                                                &stream_event.machineHash.0.to_vec(),
+                                                &stream_event.input.0.to_vec(),
+                                                &stream_event.callback.0.to_vec(),
+                                                &task_status::waits_for_handling,
+                                            ],
+                                        )
+                                        .await
+                                    {
+                                        Ok(_) => {
+                                            client
+                                                .batch_execute(
+                                                    "
+                                        NOTIFY new_task_issued;
+                                        ",
+                                                )
+                                                .await
+                                                .unwrap();
+                                            println!("Inserted new task into the database and notified.");
+                                        }
+                                        Err(err) => {
+                                            eprintln!("Failed to insert task into database: {:?}", err);
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    eprintln!("Error in event stream: {:?}", err);
+                                }
+                            }
+                        }
+                    }
+                });
 }
 
 fn subscribe_operator_socket_update(
@@ -1101,7 +1551,15 @@ async fn generate_eth_address(
         .unwrap();
     builder.address()
 }
-
+impl fmt::Debug for L1Coprocessor::MessageReceived {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MessageReceived")
+            .field("responseHash", &hex::encode(self.responseHash))
+            .field("sender", &self.sender)
+            .field("data", &hex::encode(&self.data))
+            .finish()
+    }
+}
 impl Into<NonSignerStakesAndSignatureSol> for NonSignerStakesAndSignature {
     fn into(self) -> NonSignerStakesAndSignatureSol {
         let apk_g2 = G2PointSol {
@@ -1233,5 +1691,24 @@ sol! {
             address callback_address,
             bytes[] calldata outputs
         );
+    }
+    #[sol(rpc)]
+    contract L1Coprocessor {
+        //constructor(address _crossDomainMessenger, IRegistryCoordinator _registryCoordinator) {}
+
+        function setL2Coprocessor(address _l2Coprocessor) external;
+
+        #[derive(Debug)]
+        function solverCallbackSendToL2(
+            ResponseSol calldata resp,
+            bytes calldata quorumNumbers,
+            uint32 quorumThresholdPercentage,
+            uint8 thresholdDenominator,
+            uint32 blockNumber,
+            NonSignerStakesAndSignatureSol memory nonSignerStakesAndSignature,
+            uint32 gasLimit
+        ) external;
+
+        event MessageReceived(bytes32 responseHash, address sender, bytes data);
     }
 }
