@@ -1087,7 +1087,7 @@ fn new_task_issued_handler_l2(
                                     .unwrap();
 
                                 let secret_key_str: String = secret_key.clone();
-                                let secret_key = SecretKey::from_slice(&hex::decode(secret_key_str).unwrap()).unwrap();
+                                let secret_key = SecretKey::from_slice(&hex::decode(secret_key.clone()).unwrap()).unwrap();
                                 let response = ResponseSol {
                                     ruleSet: Address::parse_checksummed(format!("0x{}", ruleset.clone()), None).unwrap(),
                                     machineHash: task_issued.machineHash,
@@ -1156,7 +1156,7 @@ fn new_task_issued_handler_l2(
                                         match send_message_to_l1(
                                             l2_http_endpoint.clone(),
                                             Address::parse_checksummed(l2_coprocessor_address.clone(), None).unwrap(),
-                                            secret_key.clone(),
+                                            secret_key_str.clone(),
                                             response,
                                             quorum_nums.into(),
                                             100,
