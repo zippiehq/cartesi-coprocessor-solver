@@ -1,7 +1,7 @@
 use alloy::signers::k256::SecretKey;
 use alloy_contract::Event;
 use alloy_primitives::{keccak256, Address, FixedBytes, Keccak256, TxHash, B256};
-use alloy_provider::{Provider, ProviderBuilder};
+use alloy_provider::{Identity, Provider, ProviderBuilder, ReqwestProvider};
 use alloy_rpc_types_eth::Filter;
 use alloy_signer_local::{MnemonicBuilder, PrivateKeySigner};
 use alloy_sol_types::sol;
@@ -29,7 +29,7 @@ use futures_util::{StreamExt, TryStreamExt};
 use hex::FromHex;
 use hyper::{service::{make_service_fn, service_fn}, Body, Client, Request, Response, Server, StatusCode, Uri};
 use serde::Deserialize;
-use std::{collections::HashMap, convert::Infallible, net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::HashMap, convert::Infallible, fmt, net::SocketAddr, sync::Arc, time::Duration};
 use std::error::Error;
 use std::io::Bytes;
 use std::str::FromStr;
@@ -42,6 +42,7 @@ use tokio_util::sync::CancellationToken;
 use ICoprocessor::TaskIssued;
 mod outputs_merkle;
 use alloy_network::EthereumWallet;
+use alloy_provider::fillers::{BlobGasFiller, ChainIdFiller, FillProvider, GasFiller, JoinFill, NonceFiller, WalletFiller};
 use futures_util::stream;
 use tokio_postgres::types::{FromSql, ToSql};
 
@@ -990,6 +991,7 @@ fn new_task_issued_handler_l1(
         }
     });
 }
+
 fn new_task_issued_handler_l2(
     l2_ws_endpoint: String,
     l2_http_endpoint: String,
@@ -1161,7 +1163,7 @@ fn new_task_issued_handler_l2(
                                             100,
                                             current_block_num as u32,
                                             non_signer_stakes_and_signature_response.clone(),
-                                            task_issued.callback,
+                                            100000,
                                         )
                                             .await {
                                             Ok(tx_hash) => {
@@ -1272,7 +1274,7 @@ fn subscribe_task_issued_l1(
     });
 }
 async fn send_message_to_l1<>(
-    l2_http_endpoint: String,
+    l1_http_endpoint: String,
     l1_coprocessor_address: Address,
     secret_key: String,
     resp: ResponseSol,
@@ -1281,7 +1283,7 @@ async fn send_message_to_l1<>(
     threshold_denominator: u8,
     block_number: u32,
     non_signer_stakes_and_signature_response: NonSignerStakesAndSignature,
-    callback_address: Address,
+    gas_limit: u32,
 ) -> Result<TxHash, Box<dyn Error>> {
     let decoded_secret_key = SecretKey::from_slice(&hex::decode(secret_key)?)
         .map_err(|e| format!("Invalid secret key: {:?}", e))?;
@@ -1291,11 +1293,11 @@ async fn send_message_to_l1<>(
     let provider = ProviderBuilder::new()
         .with_recommended_fillers()
         .wallet(wallet)
-        .on_http(l2_http_endpoint.parse().unwrap());
+        .on_http(l1_http_endpoint.parse().unwrap());
 
-    let L1Coprocessor = ResponseCallbackContract::new(l1_coprocessor_address, &provider);
+    let l1_coprocessor = L1Coprocessor::new(l1_coprocessor_address, &provider);
 
-    let pending_tx = L1Coprocessor
+    let pending_tx = l1_coprocessor
         .solverCallbackSendToL2(
             resp,
             quorum_numbers.into(),
@@ -1303,7 +1305,7 @@ async fn send_message_to_l1<>(
             threshold_denominator,
             block_number,
             non_signer_stakes_and_signature_response.into(),
-            callback_address,
+            gas_limit
         )
         .send()
         .await?;
@@ -1311,7 +1313,6 @@ async fn send_message_to_l1<>(
     let receipt = pending_tx;
     Ok(*receipt.tx_hash())
 }
-
 fn subscribe_messages_from_l1(
     l1_ws_endpoint: String,
     l1_coprocessor_address: Address,
@@ -1550,7 +1551,15 @@ async fn generate_eth_address(
         .unwrap();
     builder.address()
 }
-
+impl fmt::Debug for L1Coprocessor::MessageReceived {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MessageReceived")
+            .field("responseHash", &hex::encode(self.responseHash))
+            .field("sender", &self.sender)
+            .field("data", &hex::encode(&self.data))
+            .finish()
+    }
+}
 impl Into<NonSignerStakesAndSignatureSol> for NonSignerStakesAndSignature {
     fn into(self) -> NonSignerStakesAndSignatureSol {
         let apk_g2 = G2PointSol {
@@ -1614,24 +1623,6 @@ fn agg_response_to_non_signer_stakes_and_signature(
         nonSignerStakeIndices: agg_response.non_signer_stake_indices,
     }
 }
-sol!(
-    #[sol(rpc)]
-    contract L1Coprocessor {
-        constructor(address _crossDomainMessenger, IRegistryCoordinator _registryCoordinator) {}
-
-        function setL2Coprocessor(address _l2Coprocessor) external;
-
-        function solverCallbackSendToL2(
-            Response calldata resp,
-            bytes calldata quorumNumbers,
-            uint32 quorumThresholdPercentage,
-            uint8 thresholdDenominator,
-            uint32 blockNumber,
-            NonSignerStakesAndSignature memory nonSignerStakesAndSignature,
-            uint32 gasLimit
-        ) external;
-    }
-);
 sol!(
    interface ICoprocessor {
         #[derive(Debug)]
@@ -1700,5 +1691,24 @@ sol! {
             address callback_address,
             bytes[] calldata outputs
         );
+    }
+    #[sol(rpc)]
+    contract L1Coprocessor {
+        //constructor(address _crossDomainMessenger, IRegistryCoordinator _registryCoordinator) {}
+
+        function setL2Coprocessor(address _l2Coprocessor) external;
+
+        #[derive(Debug)]
+        function solverCallbackSendToL2(
+            ResponseSol calldata resp,
+            bytes calldata quorumNumbers,
+            uint32 quorumThresholdPercentage,
+            uint8 thresholdDenominator,
+            uint32 blockNumber,
+            NonSignerStakesAndSignatureSol memory nonSignerStakesAndSignature,
+            uint32 gasLimit
+        ) external;
+
+        event MessageReceived(bytes32 responseHash, address sender, bytes data);
     }
 }
