@@ -1482,6 +1482,42 @@ fn subscribe_task_issued_l2(
                     }
                 });
 }
+async fn finalize_on_l2(
+    l2_http_endpoint: &str,
+    l2_coprocessor_address: Address,
+    secret_key: &str,
+    resp: ResponseSol,
+    outputs: Vec<Vec<u8>>,
+    callback_address: Address,
+) -> Result<(), Box<dyn Error>> {
+    let outputs_for_sol: Vec<alloy_primitives::Bytes> = outputs
+        .into_iter()
+        .map(|o| o.into())
+        .collect();
+
+    let secret_key = alloy::signers::k256::SecretKey::from_slice(&hex::decode(secret_key)?)?;
+    let signer = alloy_signer_local::PrivateKeySigner::from(secret_key);
+    let wallet = alloy_network::EthereumWallet::from(signer);
+    let provider = ProviderBuilder::new()
+        .with_recommended_fillers()
+        .wallet(wallet)
+        .on_http(l2_http_endpoint.parse().unwrap());
+
+    let l2_coprocessor = L2Coprocessor::new(l2_coprocessor_address, &provider);
+
+    let call_builder = l2_coprocessor.callbackWithOutputs(resp, outputs_for_sol, callback_address);
+
+    match call_builder.send().await {
+        Ok(pending_tx) => {
+            println!("L2 callbackWithOutputs transaction sent! TxHash: {:?}", pending_tx.tx_hash());
+        }
+        Err(err) => {
+            eprintln!("Failed to send callbackWithOutputs transaction on L2: {:?}", err);
+        }
+    }
+
+    Ok(())
+}
 
 fn subscribe_operator_socket_update(
     arc_ws_endpoint: Arc<String>,
@@ -1710,5 +1746,15 @@ sol! {
         ) external;
 
         event MessageReceived(bytes32 responseHash, address sender, bytes data);
+    }
+
+    //l2 contract interface
+    #[sol(rpc)]
+    contract L2Coprocessor {
+        function callbackWithOutputs(
+            ResponseSol calldata resp,
+            bytes[] calldata outputs,
+            address callbackAddress
+        );
     }
 }
