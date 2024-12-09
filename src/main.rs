@@ -554,6 +554,14 @@ async fn main() {
         Address::from_str(&config.l1_coprocessor_address).unwrap(),
         pool.clone(),
     );
+    subscribe_task_completed_l2(
+        config.l2_ws_endpoint.clone(),
+        config.l2_http_endpoint.clone(),
+        Address::from_str(&config.l2_coprocessor_address).unwrap(),
+        config.secret_key.clone(),
+        pool.clone(),
+    ).await;
+
     server.await.unwrap();
 }
 
@@ -1482,6 +1490,114 @@ fn subscribe_task_issued_l2(
                     }
                 });
 }
+async fn subscribe_task_completed_l2(
+    l2_ws_endpoint: String,
+    l2_http_endpoint: String,
+    l2_coprocessor_address: Address,
+    secret_key: String,
+    pool: Pool<PostgresConnectionManager<NoTls>>,
+) {
+    tokio::spawn(async move {
+        println!("started TaskCompleted subscription on L2...");
+
+        let ws_connect = alloy_provider::WsConnect::new(l2_ws_endpoint);
+        let ws_provider = match alloy_provider::ProviderBuilder::new().on_ws(ws_connect).await {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("failed to connect to L2 provider: {}", e);
+                return;
+            }
+        };
+
+        let event_filter = Filter::new().address(l2_coprocessor_address);
+        let event: Event<_, _, IL2Coprocessor::TaskCompleted, _> =
+            Event::new(ws_provider.clone(), event_filter);
+
+        let subscription = match event.subscribe().await {
+            Ok(sub) => sub,
+            Err(e) => {
+                eprintln!("failed to subscribe to TaskCompleted events: {}", e);
+                return;
+            }
+        };
+
+        let mut stream = subscription.into_stream();
+
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok((task_completed_event, _log)) => {
+                    println!(
+                        "new TaskCompleted event on L2: machineHash={:x}, responseHash={:x}",
+                        task_completed_event.machineHash,
+                        task_completed_event.responseHash
+                    );
+
+                    let client = pool.get().await.unwrap();
+
+                    match client.execute(
+                        "INSERT INTO l2_completed_tasks (machineHash, responseHash) VALUES ($1, $2)",
+                        &[
+                            &task_completed_event.machineHash.0.to_vec(),
+                            &task_completed_event.responseHash.0.to_vec(),
+                        ],
+                    ).await {
+                        Ok(_) => println!("Recorded TaskCompleted in DB."),
+                        Err(err) => eprintln!("Failed to insert TaskCompleted event: {:?}", err),
+                    }
+
+                    let row = match client.query_one(
+                        "SELECT resp_ruleSet, resp_machineHash, resp_payloadHash, resp_outputMerkle, callback_address, outputs
+                         FROM finalization_data WHERE responseHash = $1",
+                        &[&task_completed_event.responseHash.0.to_vec()],
+                    ).await {
+                        Ok(r) => r,
+                        Err(err) => {
+                            eprintln!("Failed to retrieve finalization_data for responseHash: {:?}", err);
+                            continue;
+                        }
+                    };
+
+                    let resp_rule_set: Vec<u8> = row.get(0);
+                    let resp_machine_hash: Vec<u8> = row.get(1);
+                    let resp_payload_hash: Vec<u8> = row.get(2);
+                    let resp_output_merkle: Vec<u8> = row.get(3);
+                    let callback_address_bytes: Vec<u8> = row.get(4);
+                    let outputs_db: Vec<Vec<u8>> = row.get(5);
+
+                    let rule_set_addr = Address::from_slice(&resp_rule_set);
+                    let machine_hash_fixed = B256::from_slice(&resp_machine_hash);
+                    let payload_hash_fixed = B256::from_slice(&resp_payload_hash);
+                    let output_merkle_fixed = B256::from_slice(&resp_output_merkle);
+                    let callback_addr = Address::from_slice(&callback_address_bytes);
+
+                    let resp = ResponseSol {
+                        ruleSet: rule_set_addr,
+                        machineHash: machine_hash_fixed,
+                        payloadHash: payload_hash_fixed,
+                        outputMerkle: output_merkle_fixed,
+                    };
+
+                    if let Err(err) = finalize_on_l2(
+                        &l2_http_endpoint,
+                        l2_coprocessor_address,
+                        &secret_key,
+                        resp,
+                        outputs_db,
+                        callback_addr
+                    ).await {
+                        eprintln!("error calling finalize_on_l2: {:?}", err);
+                    } else {
+                        println!("successfully finalized on L2!");
+                    }
+                }
+                Err(err) => {
+                    eprintln!("Error reading TaskCompleted events: {:?}", err);
+                }
+            }
+        }
+    });
+}
+
 async fn finalize_on_l2(
     l2_http_endpoint: &str,
     l2_coprocessor_address: Address,
@@ -1665,6 +1781,13 @@ sol!(
         event TaskIssued(bytes32 machineHash, bytes input, address callback);
    }
 );
+
+sol! {
+    interface IL2Coprocessor {
+        #[derive(Debug)]
+        event TaskCompleted(bytes32 machineHash, bytes32 responseHash);
+    }
+}
 
 sol!(
     #[sol(rpc)]
