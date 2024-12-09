@@ -918,6 +918,46 @@ fn new_task_issued_handler_l1(
                                     .iter()
                                     .map(|bytes| bytes.clone().1.into())
                                     .collect();
+
+                                let keccak_outputs: Vec<B256> = outputs.iter().map(|o| keccak256(&o.0)).collect();
+                                let (output_merkle_fixed, _) = outputs_merkle::create_proofs(keccak_outputs, HEIGHT).unwrap();
+
+                                let ruleSet_addr = Address::parse_checksummed(format!("0x{}", ruleset.clone()), None).unwrap();
+                                let resp_rule_set = ruleSet_addr.0.to_vec();
+
+                                let machine_hash_fixed = task_issued.machineHash;
+                                let resp_machine_hash = machine_hash_fixed.0.to_vec();
+
+                                let payload_hash_fixed = keccak256(&task_issued.input);
+                                let resp_payload_hash = payload_hash_fixed.0.to_vec();
+
+                                let resp_output_merkle = output_merkle_fixed.0.to_vec();
+
+                                let callback_address_bytes = task_issued.callback.0.to_vec();
+                                let outputs_db: Vec<Vec<u8>> = outputs.iter().map(|o| o.0.to_vec()).collect();
+
+                                // finalization table impl.
+                                client.execute(
+                                    "INSERT INTO finalization_data (
+                                                    responseHash,
+                                                    resp_ruleSet,
+                                                    resp_machineHash,
+                                                    resp_payloadHash,
+                                                    resp_outputMerkle,
+                                                    callback_address,
+                                                    outputs
+                                                ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                                                ON CONFLICT (responseHash) DO NOTHING",
+                                    &[
+                                        &resp_rule_set,
+                                        &resp_machine_hash,
+                                        &resp_payload_hash,
+                                        &resp_output_merkle,
+                                        &callback_address_bytes,
+                                        &outputs_db,
+                                    ],
+                                ).await.unwrap();
+                                
                                 let call_builder = contract.solverCallbackOutputsOnly(
                                     ResponseSol {
                                         ruleSet: Address::parse_checksummed(
