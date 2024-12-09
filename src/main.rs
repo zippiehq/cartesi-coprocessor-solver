@@ -122,6 +122,23 @@ async fn main() {
     client
         .batch_execute("CREATE TABLE IF NOT EXISTS machine_hashes (id SERIAL PRIMARY KEY, machine_hash BYTEA UNIQUE)").await.unwrap();
 
+    client
+        .batch_execute(
+            "
+        CREATE TABLE IF NOT EXISTS finalization_data (
+            responseHash BYTEA PRIMARY KEY,
+            resp_ruleSet BYTEA,
+            resp_machineHash BYTEA,
+            resp_payloadHash BYTEA,
+            resp_outputMerkle BYTEA,
+            callback_address BYTEA,
+            outputs BYTEA[]
+        )
+    ",
+        )
+        .await
+        .unwrap();
+
     println!("Starting solver..");
     let arc_ws_endpoint = Arc::new(config.l1_ws_endpoint.clone());
 
@@ -957,7 +974,7 @@ fn new_task_issued_handler_l1(
                                         &outputs_db,
                                     ],
                                 ).await.unwrap();
-                                
+
                                 let call_builder = contract.solverCallbackOutputsOnly(
                                     ResponseSol {
                                         ruleSet: Address::parse_checksummed(
