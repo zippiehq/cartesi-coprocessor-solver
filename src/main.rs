@@ -126,7 +126,6 @@ async fn main() {
         .batch_execute(
             "
         CREATE TABLE IF NOT EXISTS finalization_data (
-            responseHash BYTEA PRIMARY KEY,
             resp_ruleSet BYTEA,
             resp_machineHash BYTEA,
             resp_payloadHash BYTEA,
@@ -1056,7 +1055,6 @@ fn new_task_issued_handler_l1(
         }
     });
 }
-
 fn new_task_issued_handler_l2(
     l2_ws_endpoint: String,
     l2_http_endpoint: String,
@@ -1072,7 +1070,7 @@ fn new_task_issued_handler_l2(
     secret_key: String,
     task_issuer: Address,
     pool: Pool<PostgresConnectionManager<NoTls>>,
-    postgre_connect_request: String,
+    postgres_connect_request: String,
 ) {
     task::spawn({
         async move {
@@ -1087,7 +1085,7 @@ fn new_task_issued_handler_l2(
             let time_to_expiry = Duration::from_secs(10);
 
             let (notification_client, mut connection) =
-                tokio_postgres::connect(&postgre_connect_request, NoTls)
+                tokio_postgres::connect(&postgres_connect_request, NoTls)
                     .await
                     .unwrap();
             let (tx, rx) = futures_channel::mpsc::unbounded();
@@ -1176,71 +1174,33 @@ fn new_task_issued_handler_l2(
                                     .iter()
                                     .map(|bytes| bytes.clone().1.into())
                                     .collect();
-                                let contract = ResponseCallbackContract::new(
-                                    Address::parse_checksummed(l2_coprocessor_address.clone(), None).unwrap(),
-                                    &provider,
-                                );
 
-                                match contract
-                                    .solverCallbackOutputsOnly(
-                                        ResponseSol {
-                                            ruleSet: Address::parse_checksummed(
-                                                format!("0x{}", ruleset.clone()),
-                                                None,
-                                            )
-                                                .unwrap(),
-                                            machineHash: task_issued.machineHash,
-                                            payloadHash: keccak256(&task_issued.input),
-                                            outputMerkle: outputs_merkle::create_proofs(
-                                                vec![],
-                                                HEIGHT,
-                                            )
-                                                .unwrap()
-                                                .0,
-                                        },
-                                        quorum_nums.into(),
-                                        100,
-                                        100,
-                                        current_block_num as u32,
-                                        non_signer_stakes_and_signature_response.clone().into(),
-                                        task_issued.callback,
-                                        outputs,
+                                client
+                                    .execute(
+                                        "UPDATE issued_tasks SET status = $1 WHERE id = $2;",
+                                        &[&task_status::handled, &id],
                                     )
-                                    .send()
                                     .await
-                                {
-                                    Ok(_) => {
-                                        println!("Task successfully handled on L2!");
-                                        client
-                                            .execute(
-                                                "UPDATE issued_tasks SET status = $1 WHERE id = $2;",
-                                                &[&task_status::handled, &id],
-                                            )
-                                            .await
-                                            .unwrap();
-                                        match send_message_to_l1(
-                                            l2_http_endpoint.clone(),
-                                            Address::parse_checksummed(l2_coprocessor_address.clone(), None).unwrap(),
-                                            secret_key_str.clone(),
-                                            response,
-                                            quorum_nums.into(),
-                                            100,
-                                            100,
-                                            current_block_num as u32,
-                                            non_signer_stakes_and_signature_response.clone(),
-                                            100000,
-                                        )
-                                            .await {
-                                            Ok(tx_hash) => {
-                                                println!("Message sent to L1 with tx hash: {:?}", tx_hash);
-                                            }
-                                            Err(err) => {
-                                                println!("Failed to send L1 transaction: {err}");
-                                            }
-                                        }
+                                    .unwrap();
+
+                                match send_message_to_l1(
+                                    l2_http_endpoint.clone(),
+                                    Address::parse_checksummed(l2_coprocessor_address.clone(), None).unwrap(),
+                                    secret_key_str.clone(),
+                                    response,
+                                    quorum_nums.into(),
+                                    100,
+                                    100,
+                                    current_block_num as u32,
+                                    non_signer_stakes_and_signature_response.clone(),
+                                    100000,
+                                )
+                                    .await {
+                                    Ok(tx_hash) => {
+                                        println!("Message sent to L1 with tx hash: {:?}", tx_hash);
                                     }
                                     Err(err) => {
-                                        println!("Failed to send L2 transaction: {err}");
+                                        println!("Failed to send L1 transaction: {err}");
                                     }
                                 }
                             }
@@ -1338,7 +1298,7 @@ fn subscribe_task_issued_l1(
         }
     });
 }
-async fn send_message_to_l1<>(
+async fn send_message_to_l1(
     l1_http_endpoint: String,
     l1_coprocessor_address: Address,
     secret_key: String,
