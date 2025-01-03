@@ -2210,7 +2210,7 @@ dependencies = [
 [[package]]
 name = "eigen-client-avsregistry"
 version = "0.1.0"
-source = "git+https://github.com/dymchenkko/eigensdk-rs?rev=5e24a28e5f8de753e856ca4d11c9c63e3a08e315#5e24a28e5f8de753e856ca4d11c9c63e3a08e315"
+source = "git+https://github.com/stskeeps/eigensdk-rs?rev=e29f0eeef740c07371cb59043d3c2e971bc9cdb7#e29f0eeef740c07371cb59043d3c2e971bc9cdb7"
 dependencies = [
  "alloy 0.4.2",
  "alloy-primitives",
@@ -2231,7 +2231,7 @@ dependencies = [
 [[package]]
 name = "eigen-client-elcontracts"
 version = "0.1.0"
-source = "git+https://github.com/dymchenkko/eigensdk-rs?rev=5e24a28e5f8de753e856ca4d11c9c63e3a08e315#5e24a28e5f8de753e856ca4d11c9c63e3a08e315"
+source = "git+https://github.com/stskeeps/eigensdk-rs?rev=e29f0eeef740c07371cb59043d3c2e971bc9cdb7#e29f0eeef740c07371cb59043d3c2e971bc9cdb7"
 dependencies = [
  "alloy 0.4.2",
  "alloy-primitives",
@@ -2245,7 +2245,7 @@ dependencies = [
 [[package]]
 name = "eigen-crypto-bls"
 version = "0.1.0"
-source = "git+https://github.com/dymchenkko/eigensdk-rs?rev=5e24a28e5f8de753e856ca4d11c9c63e3a08e315#5e24a28e5f8de753e856ca4d11c9c63e3a08e315"
+source = "git+https://github.com/stskeeps/eigensdk-rs?rev=e29f0eeef740c07371cb59043d3c2e971bc9cdb7#e29f0eeef740c07371cb59043d3c2e971bc9cdb7"
 dependencies = [
  "alloy-primitives",
  "ark-bn254",
@@ -2262,7 +2262,7 @@ dependencies = [
 [[package]]
 name = "eigen-crypto-bn254"
 version = "0.1.0"
-source = "git+https://github.com/dymchenkko/eigensdk-rs?rev=5e24a28e5f8de753e856ca4d11c9c63e3a08e315#5e24a28e5f8de753e856ca4d11c9c63e3a08e315"
+source = "git+https://github.com/stskeeps/eigensdk-rs?rev=e29f0eeef740c07371cb59043d3c2e971bc9cdb7#e29f0eeef740c07371cb59043d3c2e971bc9cdb7"
 dependencies = [
  "ark-bn254",
  "ark-ec",
@@ -2274,7 +2274,7 @@ dependencies = [
 [[package]]
 name = "eigen-logging"
 version = "0.1.0"
-source = "git+https://github.com/dymchenkko/eigensdk-rs?rev=5e24a28e5f8de753e856ca4d11c9c63e3a08e315#5e24a28e5f8de753e856ca4d11c9c63e3a08e315"
+source = "git+https://github.com/stskeeps/eigensdk-rs?rev=e29f0eeef740c07371cb59043d3c2e971bc9cdb7#e29f0eeef740c07371cb59043d3c2e971bc9cdb7"
 dependencies = [
  "ctor",
  "once_cell",
@@ -2285,7 +2285,7 @@ dependencies = [
 [[package]]
 name = "eigen-services-avsregistry"
 version = "0.1.0"
-source = "git+https://github.com/dymchenkko/eigensdk-rs?rev=5e24a28e5f8de753e856ca4d11c9c63e3a08e315#5e24a28e5f8de753e856ca4d11c9c63e3a08e315"
+source = "git+https://github.com/stskeeps/eigensdk-rs?rev=e29f0eeef740c07371cb59043d3c2e971bc9cdb7#e29f0eeef740c07371cb59043d3c2e971bc9cdb7"
 dependencies = [
  "alloy-primitives",
  "ark-bn254",
@@ -2301,7 +2301,7 @@ dependencies = [
 [[package]]
 name = "eigen-services-blsaggregation"
 version = "0.1.0"
-source = "git+https://github.com/dymchenkko/eigensdk-rs?rev=5e24a28e5f8de753e856ca4d11c9c63e3a08e315#5e24a28e5f8de753e856ca4d11c9c63e3a08e315"
+source = "git+https://github.com/stskeeps/eigensdk-rs?rev=e29f0eeef740c07371cb59043d3c2e971bc9cdb7#e29f0eeef740c07371cb59043d3c2e971bc9cdb7"
 dependencies = [
  "alloy 0.4.2",
  "alloy-primitives",
@@ -2322,7 +2322,7 @@ dependencies = [
 [[package]]
 name = "eigen-services-operatorsinfo"
 version = "0.1.0"
-source = "git+https://github.com/dymchenkko/eigensdk-rs?rev=5e24a28e5f8de753e856ca4d11c9c63e3a08e315#5e24a28e5f8de753e856ca4d11c9c63e3a08e315"
+source = "git+https://github.com/stskeeps/eigensdk-rs?rev=e29f0eeef740c07371cb59043d3c2e971bc9cdb7#e29f0eeef740c07371cb59043d3c2e971bc9cdb7"
 dependencies = [
  "alloy 0.4.2",
  "alloy-primitives",
@@ -2342,7 +2342,7 @@ dependencies = [
 [[package]]
 name = "eigen-types"
 version = "0.1.0"
-source = "git+https://github.com/dymchenkko/eigensdk-rs?rev=5e24a28e5f8de753e856ca4d11c9c63e3a08e315#5e24a28e5f8de753e856ca4d11c9c63e3a08e315"
+source = "git+https://github.com/stskeeps/eigensdk-rs?rev=e29f0eeef740c07371cb59043d3c2e971bc9cdb7#e29f0eeef740c07371cb59043d3c2e971bc9cdb7"
 dependencies = [
  "alloy-primitives",
  "ark-serialize 0.4.2",
@@ -2356,7 +2356,7 @@ dependencies = [
 [[package]]
 name = "eigen-utils"
 version = "0.1.0"
-source = "git+https://github.com/dymchenkko/eigensdk-rs?rev=5e24a28e5f8de753e856ca4d11c9c63e3a08e315#5e24a28e5f8de753e856ca4d11c9c63e3a08e315"
+source = "git+https://github.com/stskeeps/eigensdk-rs?rev=e29f0eeef740c07371cb59043d3c2e971bc9cdb7#e29f0eeef740c07371cb59043d3c2e971bc9cdb7"
 dependencies = [
  "alloy 0.4.2",
  "reqwest 0.12.9",
