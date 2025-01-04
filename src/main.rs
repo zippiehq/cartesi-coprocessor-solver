@@ -1395,7 +1395,7 @@ fn subscribe_task_issued_l2(
                             .await
                             .unwrap();
 
-                        let event_filter = Filter::new().address(l2_coprocessor_address).event("TaskCompleted(bytes32)");
+                        let event_filter = Filter::new().address(l2_coprocessor_address).event("TaskIssued(bytes32,bytes,address)");
 
                         let event: Event<_, _, ICoprocessor::TaskIssued, _> =
                             Event::new(ws_provider.clone(), event_filter);
