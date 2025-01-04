@@ -1275,7 +1275,7 @@ fn subscribe_task_issued_l1(
                 .on_ws(ws_connect)
                 .await
                 .unwrap();
-            let event_filter = Filter::new().address(task_issuer);
+            let event_filter = Filter::new().address(task_issuer).event("TaskIssued(bytes32,bytes,address)");
             let event: Event<_, _, ICoprocessor::TaskIssued, _> =
                 Event::new(ws_provider.clone(), event_filter);
 
@@ -1395,7 +1395,7 @@ fn subscribe_task_issued_l2(
                             .await
                             .unwrap();
 
-                        let event_filter = Filter::new().address(l2_coprocessor_address);
+                        let event_filter = Filter::new().address(l2_coprocessor_address).event("TaskCompleted(bytes32)");
 
                         let event: Event<_, _, ICoprocessor::TaskIssued, _> =
                             Event::new(ws_provider.clone(), event_filter);
@@ -1496,7 +1496,7 @@ async fn subscribe_task_completed_l2(
             }
         };
 
-        let event_filter = Filter::new().address(l2_coprocessor_address);
+        let event_filter = Filter::new().address(l2_coprocessor_address).event("TaskCompleted(bytes32)");
         let event: Event<_, _, IL2Coprocessor::TaskCompleted, _> =
             Event::new(ws_provider.clone(), event_filter);
 
