@@ -1,34 +1,22 @@
-# fly.toml app configuration file generated for cartesi-coprocessor-solver on 2024-10-22T20:01:49+02:00
+# fly.toml app configuration file generated for cartesi-coprocessor-solver-dev on 2025-01-02T13:27:05+03:00
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
 
-app = 'cartesi-coprocessor-solver'
-primary_region = 'cdg'
+app = 'cartesi-coprocessor-solver-dev'
+primary_region = 'jnb'
 
 [build]
-  dockerfile = 'Dockerfile'
 
 [http_service]
-  internal_port = 3034
+  internal_port = 3033
   force_https = true
-  auto_stop_machines = 'off'
+  auto_stop_machines = 'stop'
   auto_start_machines = true
   min_machines_running = 0
   processes = ['app']
 
-  [[http_service.checks]]
-    interval = '30s'
-    timeout = '5s'
-    grace_period = '10s'
-    method = 'GET'
-    path = '/health'
-
-[[files]]
-  guest_path = '/cartesi-coprocessor-solver/config.toml'
-  local_path = 'config_secret.toml'
-
 [[vm]]
   memory = '1gb'
   cpu_kind = 'shared'
-  cpus = 1
+  cpus = 2
