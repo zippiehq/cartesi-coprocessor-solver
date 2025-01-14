@@ -1,5 +1,7 @@
+use alloy::signers::k256::elliptic_curve::consts;
 use alloy::signers::k256::SecretKey;
 use alloy_contract::Event;
+use alloy_primitives::U256;
 use alloy_primitives::{bytes, keccak256, Address, FixedBytes, Keccak256, TxHash, B256};
 use alloy_provider::{Identity, Provider, ProviderBuilder, ReqwestProvider};
 use alloy_rpc_types_eth::Filter;
@@ -27,14 +29,15 @@ use eigen_utils::{
 use futures_util::FutureExt;
 use futures_util::{StreamExt, TryStreamExt};
 use hex::FromHex;
-use hyper::{service::{make_service_fn, service_fn}, Body, Client, Request, Response, Server, StatusCode, Uri};
+use hyper::{
+    service::{make_service_fn, service_fn},
+    Body, Client, Request, Response, Server, StatusCode, Uri,
+};
 use serde::Deserialize;
-use std::{collections::HashMap, convert::Infallible, net::SocketAddr, sync::Arc, time::Duration};
 use std::error::Error;
 use std::io::Bytes;
 use std::str::FromStr;
-use alloy::signers::k256::elliptic_curve::consts;
-use alloy_primitives::U256;
+use std::{collections::HashMap, convert::Infallible, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{
     sync::Mutex,
     task::{self, JoinHandle},
@@ -44,7 +47,9 @@ use tokio_util::sync::CancellationToken;
 use ICoprocessor::TaskIssued;
 mod outputs_merkle;
 use alloy_network::EthereumWallet;
-use alloy_provider::fillers::{BlobGasFiller, ChainIdFiller, FillProvider, GasFiller, JoinFill, NonceFiller, WalletFiller};
+use alloy_provider::fillers::{
+    BlobGasFiller, ChainIdFiller, FillProvider, GasFiller, JoinFill, NonceFiller, WalletFiller,
+};
 use futures_util::stream;
 use tokio_postgres::types::{FromSql, ToSql};
 
@@ -352,6 +357,109 @@ async fn main() {
                                 }
                             }
                         }
+                        (hyper::Method::GET, ["get_preimage", hash_type, hash]) => {
+                            let ws_connect = alloy_provider::WsConnect::new(ws_endpoint);
+                            let ws_provider = alloy_provider::ProviderBuilder::new()
+                                .on_ws(ws_connect)
+                                .await
+                                .unwrap();
+                            let current_block_number =
+                                ws_provider.clone().get_block_number().await.unwrap();
+                            let quorum_nums = [0];
+
+                            match avs_registry_service
+                                .clone()
+                                .get_operators_avs_state_at_block(
+                                    current_block_number as u32,
+                                    &quorum_nums,
+                                )
+                                .await
+                            {
+                                Ok(operators) => {
+                                    for operator in operators {
+                                        let operator_id = operator.1.operator_id;
+                                        let sockets_map = sockets_map.lock().await;
+                                        match sockets_map.get(&operator_id.to_vec()) {
+                                            Some(mut socket) => {
+                                                if socket == "Not Needed" {
+                                                    socket = &config_socket;
+                                                }
+                                                let get_preimage_request = Request::builder()
+                                                    .method("GET")
+                                                    .uri(format!(
+                                                        "{}/get_preimage/{}/{}",
+                                                        socket, hash_type, hash
+                                                    ))
+                                                    .body(Body::empty())
+                                                    .unwrap();
+
+                                                let http_client = Client::new();
+
+                                                let preimage_response = http_client
+                                                    .request(get_preimage_request)
+                                                    .await
+                                                    .unwrap();
+
+                                                let preimage_response_bytes =
+                                                    hyper::body::to_bytes(preimage_response)
+                                                        .await
+                                                        .unwrap()
+                                                        .to_vec();
+
+                                                if check_preimage_hash(
+                                                    &hex::decode(hash).unwrap(),
+                                                    &preimage_response_bytes,
+                                                )
+                                                .is_ok()
+                                                {
+                                                    let response = Response::builder()
+                                                        .status(StatusCode::OK)
+                                                        .body(Body::from(preimage_response_bytes))
+                                                        .unwrap();
+
+                                                    return Ok::<_, Infallible>(response);
+                                                }
+                                            }
+                                            None => {
+                                                let json_error = serde_json::json!({
+                                                    "error": format!("No socket for operator_id = {:?}", hex::encode(operator_id.to_vec()))
+                                                });
+                                                let json_error =
+                                                    serde_json::to_string(&json_error).unwrap();
+                                                let response = Response::builder()
+                                                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                                    .body(Body::from(json_error))
+                                                    .unwrap();
+
+                                                return Ok::<_, Infallible>(response);
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    let json_error = serde_json::json!({
+                                        "error": format!("Failed to get operators: {:?}", err)
+                                    });
+                                    let json_error = serde_json::to_string(&json_error).unwrap();
+                                    let response = Response::builder()
+                                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                        .body(Body::from(json_error))
+                                        .unwrap();
+                                    return Ok::<_, Infallible>(response);
+                                }
+                            }
+                            let json_error = serde_json::json!({
+                                "error": "Preimage wasn't found",
+                            });
+                            let json_error = serde_json::to_string(&json_error).unwrap();
+
+                            let response = Response::builder()
+                                .status(StatusCode::NOT_FOUND)
+                                .body(Body::from(json_error))
+                                .unwrap();
+
+                            return Ok::<_, Infallible>(response);
+                        }
                         (hyper::Method::POST, ["ensure", cid_str, machine_hash, size_str]) => {
                             let generated_address = generate_eth_address(
                                 pool.clone(),
@@ -559,8 +667,8 @@ async fn main() {
             Address::from_str(&config.l2_coprocessor_address).unwrap(),
             config.secret_key.clone(),
             pool.clone(),
-        ).await;
-
+        )
+        .await;
     } else {
         //Subscriber which inserts new tasks into the DB
         subscribe_task_issued_l1(
@@ -580,7 +688,7 @@ async fn main() {
             sockets_map.clone(),
             config.socket.clone(),
             config.ruleset.clone(),
-        config.max_ops,
+            config.max_ops,
             current_block_num,
             config.secret_key.clone(),
             config.task_issuer,
@@ -1068,8 +1176,8 @@ fn new_task_issued_handler_l2(
                 .on_ws(l2_ws_connect)
                 .await
                 .unwrap();
-            let l1_http_provider = alloy_provider::ProviderBuilder::new()
-                .on_http(l1_http_endpoint.parse().unwrap());
+            let l1_http_provider =
+                alloy_provider::ProviderBuilder::new().on_http(l1_http_endpoint.parse().unwrap());
             let quorum_nums = [0];
             let quorum_threshold_percentages = vec![100_u8];
             let time_to_expiry = Duration::from_secs(10);
@@ -1286,7 +1394,7 @@ fn subscribe_task_issued_l1(
     task_issuer: Address,
     pool: Pool<PostgresConnectionManager<NoTls>>,
     secret_key: String,
-    payment_phrase: String
+    payment_phrase: String,
 ) {
     task::spawn({
         async move {
@@ -1297,7 +1405,9 @@ fn subscribe_task_issued_l1(
                 .on_ws(ws_connect)
                 .await
                 .unwrap();
-            let event_filter = Filter::new().address(task_issuer).event("TaskIssued(bytes32,bytes,address)");
+            let event_filter = Filter::new()
+                .address(task_issuer)
+                .event("TaskIssued(bytes32,bytes,address)");
             let event: Event<_, _, ICoprocessor::TaskIssued, _> =
                 Event::new(ws_provider.clone(), event_filter);
 
@@ -1424,67 +1534,64 @@ fn subscribe_task_issued_l2(
     payment_phrase: String,
 ) {
     task::spawn({
-                    async move {
-                        let client = pool.get().await.unwrap();
-                        println!("Started TaskIssued subscription on L2");
+        async move {
+            let client = pool.get().await.unwrap();
+            println!("Started TaskIssued subscription on L2");
 
-                        let ws_connect = alloy_provider::WsConnect::new(l2_ws_endpoint);
-                        let ws_provider = alloy_provider::ProviderBuilder::new()
-                            .on_ws(ws_connect)
-                            .await
-                            .unwrap();
+            let ws_connect = alloy_provider::WsConnect::new(l2_ws_endpoint);
+            let ws_provider = alloy_provider::ProviderBuilder::new()
+                .on_ws(ws_connect)
+                .await
+                .unwrap();
 
-                        let addr_parsed = Address::from_str(&l2_coprocessor_address)
-                            .expect("Invalid L2 coprocessor address string");
+            let addr_parsed = Address::from_str(&l2_coprocessor_address)
+                .expect("Invalid L2 coprocessor address string");
 
-                        let event_filter = Filter::new()
-                            .address(addr_parsed)
-                            .event("TaskIssued(bytes32,bytes,address)");
+            let event_filter = Filter::new()
+                .address(addr_parsed)
+                .event("TaskIssued(bytes32,bytes,address)");
 
-                        let event: Event<_, _, ICoprocessor::TaskIssued, _> =
-                            Event::new(ws_provider.clone(), event_filter);
+            let event: Event<_, _, ICoprocessor::TaskIssued, _> =
+                Event::new(ws_provider.clone(), event_filter);
 
-                        let mut subscription = event.subscribe().await.unwrap();
-                        let mut stream = subscription.into_stream();
+            let mut subscription = event.subscribe().await.unwrap();
+            let mut stream = subscription.into_stream();
 
-                        while let Some(result) = stream.next().await {
-                            match result {
-                                Ok((stream_event, _)) => {
-                                    println!("New TaskIssued event on L2: {:?}", stream_event);
+            while let Some(result) = stream.next().await {
+                match result {
+                    Ok((stream_event, _)) => {
+                        println!("New TaskIssued event on L2: {:?}", stream_event);
 
-                                    let generated_address = generate_eth_address(
-                                        pool.clone(),
-                                        stream_event.machineHash,
-                                        payment_phrase.clone(),
-                                    )
-                                        .await;
+                        let generated_address = generate_eth_address(
+                            pool.clone(),
+                            stream_event.machineHash,
+                            payment_phrase.clone(),
+                        )
+                        .await;
 
-                                    let decoded_secret_key =
-                                        SecretKey::from_slice(&hex::decode(secret_key.clone()).unwrap())
-                                            .unwrap();
-                                    let signer = PrivateKeySigner::from(decoded_secret_key);
-                                    let wallet = EthereumWallet::from(signer);
-                                    let provider = ProviderBuilder::new()
-                                        .with_recommended_fillers()
-                                        .wallet(wallet)
-                                        .on_http(l2_http_endpoint.parse().unwrap());
+                        let decoded_secret_key =
+                            SecretKey::from_slice(&hex::decode(secret_key.clone()).unwrap())
+                                .unwrap();
+                        let signer = PrivateKeySigner::from(decoded_secret_key);
+                        let wallet = EthereumWallet::from(signer);
+                        let provider = ProviderBuilder::new()
+                            .with_recommended_fillers()
+                            .wallet(wallet)
+                            .on_http(l2_http_endpoint.parse().unwrap());
 
-                                    let contract = IERC20::new(payment_token, &provider);
+                        let contract = IERC20::new(payment_token, &provider);
 
-                                    let balance_caller = contract.balanceOf(generated_address);
-                                    match balance_caller.call().await {
-                                        Ok(balance) => {
-                                            println!(
-                                                "Balance of {:?} = {:?}",
-                                                generated_address, balance
-                                            );
-                                        }
-                                        Err(err) => {
-                                            println!("Failed to fetch balance: {:?}", err);
-                                        }
-                                    }
+                        let balance_caller = contract.balanceOf(generated_address);
+                        match balance_caller.call().await {
+                            Ok(balance) => {
+                                println!("Balance of {:?} = {:?}", generated_address, balance);
+                            }
+                            Err(err) => {
+                                println!("Failed to fetch balance: {:?}", err);
+                            }
+                        }
 
-                                    match client
+                        match client
                                         .execute(
                                             "INSERT INTO issued_tasks (machineHash, input, callback, status) VALUES ($1, $2, $3, $4::task_status)",
                                             &[
@@ -1511,14 +1618,14 @@ fn subscribe_task_issued_l2(
                                             eprintln!("Failed to insert task into database: {:?}", err);
                                         }
                                     }
-                                }
-                                Err(err) => {
-                                    eprintln!("Error in event stream: {:?}", err);
-                                }
-                            }
-                        }
                     }
-                });
+                    Err(err) => {
+                        eprintln!("Error in event stream: {:?}", err);
+                    }
+                }
+            }
+        }
+    });
 }
 
 async fn subscribe_task_completed_l2(
@@ -1532,7 +1639,10 @@ async fn subscribe_task_completed_l2(
         println!("started TaskCompleted subscription on L2...");
 
         let ws_connect = alloy_provider::WsConnect::new(l2_ws_endpoint);
-        let ws_provider = match alloy_provider::ProviderBuilder::new().on_ws(ws_connect).await {
+        let ws_provider = match alloy_provider::ProviderBuilder::new()
+            .on_ws(ws_connect)
+            .await
+        {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("failed to connect to L2 provider: {}", e);
@@ -1540,7 +1650,9 @@ async fn subscribe_task_completed_l2(
             }
         };
 
-        let event_filter = Filter::new().address(l2_coprocessor_address).event("TaskCompleted(bytes32)");
+        let event_filter = Filter::new()
+            .address(l2_coprocessor_address)
+            .event("TaskCompleted(bytes32)");
         let event: Event<_, _, IL2Coprocessor::TaskCompleted, _> =
             Event::new(ws_provider.clone(), event_filter);
 
@@ -1602,8 +1714,10 @@ async fn subscribe_task_completed_l2(
                         &secret_key,
                         resp,
                         outputs_db,
-                        callback_addr
-                    ).await {
+                        callback_addr,
+                    )
+                    .await
+                    {
                         eprintln!("error calling finalize_on_l2: {:?}", err);
                     } else {
                         println!("successfully finalized on L2!");
@@ -1624,10 +1738,8 @@ async fn finalize_on_l2(
     outputs: Vec<Vec<u8>>,
     callback_address: Address,
 ) -> Result<(), Box<dyn Error>> {
-    let outputs_for_sol: Vec<alloy_primitives::Bytes> = outputs
-        .into_iter()
-        .map(|o| o.into())
-        .collect();
+    let outputs_for_sol: Vec<alloy_primitives::Bytes> =
+        outputs.into_iter().map(|o| o.into()).collect();
 
     let secret_key = alloy::signers::k256::SecretKey::from_slice(&hex::decode(secret_key)?)?;
     let signer = alloy_signer_local::PrivateKeySigner::from(secret_key);
@@ -1639,7 +1751,8 @@ async fn finalize_on_l2(
 
     let l2_coprocessor = L2Coprocessor::new(l2_coprocessor_address, &provider);
 
-    let call_builder = l2_coprocessor.callbackWithOutputs(resp.clone(), outputs_for_sol.clone(), callback_address);
+    let call_builder =
+        l2_coprocessor.callbackWithOutputs(resp.clone(), outputs_for_sol.clone(), callback_address);
 
     println!(
         "callbackWithOutputs transaction on L2 with:\n  resp = {:?}\n  outputs = {:?}\n  callbackAddress = {:?}\n calldata = {:?}",
@@ -1651,10 +1764,16 @@ async fn finalize_on_l2(
 
     match call_builder.send().await {
         Ok(pending_tx) => {
-            println!("L2 callbackWithOutputs transaction sent! TxHash: {:?}", pending_tx.tx_hash());
+            println!(
+                "L2 callbackWithOutputs transaction sent! TxHash: {:?}",
+                pending_tx.tx_hash()
+            );
         }
         Err(err) => {
-            eprintln!("Failed to send callbackWithOutputs transaction on L2: {:?}", err);
+            eprintln!(
+                "Failed to send callbackWithOutputs transaction on L2: {:?}",
+                err
+            );
         }
     }
 
@@ -1763,6 +1882,19 @@ impl Into<NonSignerStakesAndSignatureSol> for NonSignerStakesAndSignature {
             totalStakeIndices: self.totalStakeIndices,
             nonSignerStakeIndices: self.nonSignerStakeIndices,
         }
+    }
+}
+
+fn check_preimage_hash(hash: &Vec<u8>, data: &Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut hasher = Keccak256::new();
+    hasher.update(data);
+    let result = hasher.finalize();
+    if &result.to_vec() == hash {
+        return Ok(());
+    } else {
+        return Err(Box::<dyn std::error::Error>::from(
+            "keccak256 of the data and the hash don't match",
+        ));
     }
 }
 
