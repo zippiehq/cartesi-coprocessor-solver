@@ -967,7 +967,7 @@ fn new_task_issued_handler_l1(
     secret_key: String,
     task_issuer: Address,
     pool: Pool<PostgresConnectionManager<NoTls>>,
-    postgre_connect_request: String,
+    postgres_connect_request: String,
 ) {
     task::spawn({
         async move {
@@ -981,8 +981,8 @@ fn new_task_issued_handler_l1(
             let quorum_threshold_percentages = vec![100_u8];
             let time_to_expiry = Duration::from_secs(10);
 
-            let (notification_client, mut connection) =
-                tokio_postgres::connect(&postgre_connect_request, NoTls)
+            let (mut notification_client, mut connection) =
+                tokio_postgres::connect(&postgres_connect_request, NoTls)
                     .await
                     .unwrap();
             let (tx, rx) = futures_channel::mpsc::unbounded();
@@ -998,8 +998,27 @@ fn new_task_issued_handler_l1(
             loop {
                 match client
                     .query_one(
-                        "UPDATE issued_tasks SET status = $1 WHERE id = ( SELECT id FROM issued_tasks WHERE status = $2 ORDER BY id LIMIT 1) RETURNING *;",
-                        &[&task_status::in_progress, &task_status::waits_for_handling],
+                        "UPDATE issued_tasks 
+                        SET status = $1 
+                        WHERE id = (
+                            SELECT id 
+                            FROM issued_tasks 
+                            WHERE status = $2 OR status = $3 
+                            ORDER BY 
+                                CASE 
+                                    WHEN status = $2 THEN 1 
+                                    WHEN status = $3 THEN 2 
+                                    ELSE 3 
+                                END, 
+                                id DESC
+                            LIMIT 1
+                        ) 
+                        RETURNING *;",
+                        &[
+                            &task_status::in_progress,
+                            &task_status::in_progress,
+                            &task_status::waits_for_handling,
+                        ],
                     )
                     .await
                 {
@@ -1135,10 +1154,18 @@ fn new_task_issued_handler_l1(
                     }
                     Err(_) => {
                         println!("waiting for new notifications");
-                        notification_client
+                        match notification_client
                             .batch_execute("LISTEN new_task_issued;")
                             .await
-                            .unwrap();
+                        {
+                            Ok(_) => {}
+                            Err(_) => {
+                                (notification_client, _) =
+                                    tokio_postgres::connect(&postgres_connect_request, NoTls)
+                                        .await
+                                        .unwrap();
+                            }
+                        }
                         notification_filter.next().await;
                     }
                 }
@@ -1182,7 +1209,7 @@ fn new_task_issued_handler_l2(
             let quorum_threshold_percentages = vec![100_u8];
             let time_to_expiry = Duration::from_secs(10);
 
-            let (notification_client, mut connection) =
+            let (mut notification_client, mut connection) =
                 tokio_postgres::connect(&postgres_connect_request, NoTls)
                     .await
                     .unwrap();
@@ -1199,8 +1226,27 @@ fn new_task_issued_handler_l2(
             loop {
                 match client
                     .query_one(
-                        "UPDATE issued_tasks SET status = $1 WHERE id = ( SELECT id FROM issued_tasks WHERE status = $2 ORDER BY id LIMIT 1) RETURNING *;",
-                        &[&task_status::in_progress, &task_status::waits_for_handling],
+                        "UPDATE issued_tasks 
+                        SET status = $1 
+                        WHERE id = (
+                            SELECT id 
+                            FROM issued_tasks 
+                            WHERE status = $2 OR status = $3 
+                            ORDER BY 
+                                CASE 
+                                    WHEN status = $2 THEN 1 
+                                    WHEN status = $3 THEN 2 
+                                    ELSE 3 
+                                END, 
+                                id DESC
+                            LIMIT 1
+                        ) 
+                        RETURNING *;",
+                        &[
+                            &task_status::in_progress,
+                            &task_status::in_progress,
+                            &task_status::waits_for_handling,
+                        ],
                     )
                     .await
                 {
@@ -1216,18 +1262,12 @@ fn new_task_issued_handler_l2(
                             callback: Address::from_slice(&callback),
                         };
 
-                        let current_block_number = l1_http_provider
-                            .clone()
-                            .get_block_number()
-                            .await
-                            .unwrap();
+                        let current_block_number =
+                            l1_http_provider.clone().get_block_number().await.unwrap();
 
                         match avs_registry_service
                             .clone()
-                            .get_operators_avs_state_at_block(
-                                current_block_number as u32,
-                                &[0],
-                            )
+                            .get_operators_avs_state_at_block(current_block_number as u32, &[0])
                             .await
                         {
                             Ok(operators) => {
@@ -1245,11 +1285,14 @@ fn new_task_issued_handler_l2(
                                     quorum_nums.to_vec(),
                                     quorum_threshold_percentages.clone(),
                                 )
-                                    .await
-                                    .unwrap();
+                                .await
+                                .unwrap();
 
                                 let secret_key_str: String = secret_key.clone();
-                                let secret_key = SecretKey::from_slice(&hex::decode(secret_key.clone()).unwrap()).unwrap();
+                                let secret_key = SecretKey::from_slice(
+                                    &hex::decode(secret_key.clone()).unwrap(),
+                                )
+                                .unwrap();
 
                                 let signer = PrivateKeySigner::from(secret_key);
                                 let wallet = EthereumWallet::from(signer);
@@ -1269,9 +1312,14 @@ fn new_task_issued_handler_l2(
                                     .map(|bytes| bytes.clone().1.into())
                                     .collect();
 
-                                let keccak_outputs: Vec<B256> = outputs.iter().map(|o| keccak256(&o.0)).collect();
+                                let keccak_outputs: Vec<B256> =
+                                    outputs.iter().map(|o| keccak256(&o.0)).collect();
 
-                                let ruleSet_addr = Address::parse_checksummed(format!("0x{}", ruleset.clone()), None).unwrap();
+                                let ruleSet_addr = Address::parse_checksummed(
+                                    format!("0x{}", ruleset.clone()),
+                                    None,
+                                )
+                                .unwrap();
                                 let resp_rule_set = ruleSet_addr.0.to_vec();
 
                                 let response_hash_fixed = bls_agg_response.0.task_response_digest;
@@ -1283,22 +1331,29 @@ fn new_task_issued_handler_l2(
                                 let payload_hash_fixed = keccak256(&task_issued.input);
                                 let resp_payload_hash = payload_hash_fixed.0.to_vec();
 
-                                let (output_merkle_fixed, _) = outputs_merkle::create_proofs(keccak_outputs, HEIGHT).unwrap();
+                                let (output_merkle_fixed, _) =
+                                    outputs_merkle::create_proofs(keccak_outputs, HEIGHT).unwrap();
                                 let resp_output_merkle = output_merkle_fixed.0.to_vec();
 
                                 let response = ResponseSol {
-                                    ruleSet: Address::parse_checksummed(format!("0x{}", ruleset.clone()), None).unwrap(),
+                                    ruleSet: Address::parse_checksummed(
+                                        format!("0x{}", ruleset.clone()),
+                                        None,
+                                    )
+                                    .unwrap(),
                                     machineHash: task_issued.machineHash,
                                     payloadHash: keccak256(&task_issued.input),
                                     outputMerkle: output_merkle_fixed,
                                 };
 
                                 let callback_address_bytes = task_issued.callback.0.to_vec();
-                                let outputs_db: Vec<Vec<u8>> = outputs.iter().map(|o| o.0.to_vec()).collect();
+                                let outputs_db: Vec<Vec<u8>> =
+                                    outputs.iter().map(|o| o.0.to_vec()).collect();
 
                                 // finalization table impl.
-                                client.execute(
-                                    "INSERT INTO finalization_data (
+                                client
+                                    .execute(
+                                        "INSERT INTO finalization_data (
                                                     resp_responseHash,
                                                     resp_ruleSet,
                                                     resp_machineHash,
@@ -1308,16 +1363,18 @@ fn new_task_issued_handler_l2(
                                                     outputs
                                                 ) VALUES ($1, $2, $3, $4, $5, $6, $7)
                                                 ON CONFLICT (resp_responseHash) DO NOTHING",
-                                    &[
-                                        &resp_response_hash,
-                                        &resp_rule_set,
-                                        &resp_machine_hash,
-                                        &resp_payload_hash,
-                                        &resp_output_merkle,
-                                        &callback_address_bytes,
-                                        &outputs_db,
-                                    ],
-                                ).await.unwrap();
+                                        &[
+                                            &resp_response_hash,
+                                            &resp_rule_set,
+                                            &resp_machine_hash,
+                                            &resp_payload_hash,
+                                            &resp_output_merkle,
+                                            &callback_address_bytes,
+                                            &outputs_db,
+                                        ],
+                                    )
+                                    .await
+                                    .unwrap();
 
                                 println!(
                                     "Calling send_message_to_l1 with:\n  l1_http_endpoint = {}\n  l1_coprocessor_address = {}\n  secret_key_str = {}\n  quorum_nums = {:?}\n  current_block_num = {}\n  l2Sender = {}\n  eth_value = {}\n",
@@ -1332,7 +1389,11 @@ fn new_task_issued_handler_l2(
 
                                 match send_message_to_l1(
                                     l1_http_endpoint.clone(),
-                                    Address::parse_checksummed(l1_coprocessor_address.clone(), None).unwrap(),
+                                    Address::parse_checksummed(
+                                        l1_coprocessor_address.clone(),
+                                        None,
+                                    )
+                                    .unwrap(),
                                     secret_key_str.clone(),
                                     response,
                                     quorum_nums.into(),
@@ -1344,7 +1405,8 @@ fn new_task_issued_handler_l2(
                                     sender_data.clone(),
                                     eth_value.clone(),
                                 )
-                                    .await {
+                                .await
+                                {
                                     Ok(tx_hash) => {
                                         println!("Message sent to L1 with tx hash: {:?}", tx_hash);
                                         client
@@ -1375,10 +1437,18 @@ fn new_task_issued_handler_l2(
                     }
                     Err(_) => {
                         println!("Waiting for new L2 tasks...");
-                        notification_client
+                        match notification_client
                             .batch_execute("LISTEN new_task_issued;")
                             .await
-                            .unwrap();
+                        {
+                            Ok(_) => {}
+                            Err(_) => {
+                                (notification_client, _) =
+                                    tokio_postgres::connect(&postgres_connect_request, NoTls)
+                                        .await
+                                        .unwrap();
+                            }
+                        }
                         notification_filter.next().await;
                     }
                 }
@@ -1398,7 +1468,6 @@ fn subscribe_task_issued_l1(
 ) {
     task::spawn({
         async move {
-            let client = pool.get().await.unwrap();
             println!("Started TaskIssued subscription");
             let ws_connect = alloy_provider::WsConnect::new(l1_ws_endpoint);
             let ws_provider = alloy_provider::ProviderBuilder::new()
@@ -1439,6 +1508,7 @@ fn subscribe_task_issued_l1(
                         println!("Transaction wasn't sent successfully: {err}");
                     }
                 }
+                let client = pool.get().await.unwrap();
                 match client.execute(
                     "INSERT INTO issued_tasks (machineHash, input, callback, status) VALUES ($1, $2, $3, $4::task_status) ",
                     &[
