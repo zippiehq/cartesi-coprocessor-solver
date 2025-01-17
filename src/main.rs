@@ -820,30 +820,32 @@ async fn handle_task_issued_operator(
                     }
                 };
 
-                let finish_callback: Vec<serde_json::Value> =
-                    match response_json.get("finish_callback") {
-                        Some(serde_json::Value::Array(finish_callback)) => {
-                            if finish_callback.len() == 2
-                                && finish_callback[0].is_number()
-                                && finish_callback[1].is_array()
-                            {
-                                finish_callback[1].as_array().unwrap().to_vec()
-                            } else {
-                                finish_callback.to_vec()
-                            }
+                let finish_callback: Vec<serde_json::Value> = match response_json
+                    .get("finish_callback")
+                {
+                    Some(serde_json::Value::Array(finish_callback)) => {
+                        if finish_callback.len() == 2
+                            && finish_callback[0].is_number()
+                            && finish_callback[1].is_array()
+                        {
+                            finish_callback[1].as_array().unwrap().to_vec()
+                        } else {
+                            finish_callback.to_vec()
                         }
-                        _ => {
-                            return Err(format!("No finish_callback found in request response").into());
-                        }
-                    };
+                    }
+                    _ => {
+                        return Err(format!("No finish_callback found in request response").into());
+                    }
+                };
                 let finish_result = extract_number_array(finish_callback);
                 let outputs_vector: Vec<(u16, Vec<u8>)> =
                     match response_json.get("outputs_callback_vector") {
-                        Some(outputs_callback) => {
-                            serde_json::from_value(outputs_callback.clone())?
-                        }
+                        Some(outputs_callback) => serde_json::from_value(outputs_callback.clone())?,
                         _ => {
-                            return Err(format!("No outputs_callback_vector found in request response").into());
+                            return Err(format!(
+                                "No outputs_callback_vector found in request response"
+                            )
+                            .into());
                         }
                     };
                 if generate_proofs {
@@ -905,7 +907,9 @@ async fn handle_task_issued_operator(
                 );
             }
             None => {
-                return Err(format!("No socket for operator_id {:?}", hex::encode(operator_id)).into());
+                return Err(
+                    format!("No socket for operator_id {:?}", hex::encode(operator_id)).into(),
+                );
             }
         }
     }
@@ -957,31 +961,12 @@ fn new_task_issued_handler_l1(
 ) {
     task::spawn({
         async move {
-            let client = pool.get().await.unwrap();
-            let ws_connect = alloy_provider::WsConnect::new(l1_ws_endpoint);
-            let ws_provider = alloy_provider::ProviderBuilder::new()
-                .on_ws(ws_connect)
-                .await
-                .unwrap();
             let quorum_nums = [0];
             let quorum_threshold_percentages = vec![100_u8];
             let time_to_expiry = Duration::from_secs(10);
 
-            let (mut notification_client, mut connection) =
-                tokio_postgres::connect(&postgres_connect_request, NoTls)
-                    .await
-                    .unwrap();
-            let (tx, rx) = futures_channel::mpsc::unbounded();
-            let stream =
-                stream::poll_fn(move |cx| connection.poll_message(cx)).map_err(|e| panic!("{}", e));
-            let connection = stream.forward(tx).map(|r| r.unwrap());
-            tokio::spawn(connection);
-            let mut notification_filter = rx.filter_map(|m| match m {
-                AsyncMessage::Notification(n) => futures_util::future::ready(Some(n)),
-                _ => futures_util::future::ready(None),
-            });
-
             loop {
+                let client = pool.get().await.unwrap();
                 match client
                     .query_one(
                         "UPDATE issued_tasks 
@@ -1019,6 +1004,12 @@ fn new_task_issued_handler_l1(
                             input: input.into(),
                             callback: Address::from_slice(&callback),
                         };
+                        let ws_connect = alloy_provider::WsConnect::new(l1_ws_endpoint.clone());
+                        let ws_provider = alloy_provider::ProviderBuilder::new()
+                            .on_ws(ws_connect)
+                            .await
+                            .unwrap();
+            
                         let current_block_number =
                             ws_provider.clone().get_block_number().await.unwrap();
                         match avs_registry_service
@@ -1140,16 +1131,26 @@ fn new_task_issued_handler_l1(
                     }
                     Err(_) => {
                         println!("waiting for new notifications");
+                        let (notification_client, mut connection) =
+                            tokio_postgres::connect(&postgres_connect_request, NoTls)
+                                .await
+                                .unwrap();
+                        let (tx, rx) = futures_channel::mpsc::unbounded();
+                        let stream = stream::poll_fn(move |cx| connection.poll_message(cx))
+                            .map_err(|e| panic!("{}", e));
+                        let connection = stream.forward(tx).map(|r| r.unwrap());
+                        tokio::spawn(connection);
+                        let mut notification_filter = rx.filter_map(|m| match m {
+                            AsyncMessage::Notification(n) => futures_util::future::ready(Some(n)),
+                            _ => futures_util::future::ready(None),
+                        });
+
                         match notification_client
                             .batch_execute("LISTEN new_task_issued;")
                             .await
                         {
                             Ok(_) => {}
                             Err(_) => {
-                                (notification_client, _) =
-                                    tokio_postgres::connect(&postgres_connect_request, NoTls)
-                                        .await
-                                        .unwrap();
                             }
                         }
                         notification_filter.next().await;
