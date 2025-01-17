@@ -1009,7 +1009,7 @@ fn new_task_issued_handler_l1(
                             .on_ws(ws_connect)
                             .await
                             .unwrap();
-            
+
                         let current_block_number =
                             ws_provider.clone().get_block_number().await.unwrap();
                         match avs_registry_service
@@ -1150,8 +1150,7 @@ fn new_task_issued_handler_l1(
                             .await
                         {
                             Ok(_) => {}
-                            Err(_) => {
-                            }
+                            Err(_) => {}
                         }
                         notification_filter.next().await;
                     }
@@ -1184,33 +1183,19 @@ fn new_task_issued_handler_l2(
 ) {
     task::spawn({
         async move {
-            let client = pool.get().await.unwrap();
-            let l2_ws_connect = alloy_provider::WsConnect::new(l2_ws_endpoint.clone());
-            let l2_ws_provider = alloy_provider::ProviderBuilder::new()
-                .on_ws(l2_ws_connect)
-                .await
-                .unwrap();
-            let l1_http_provider =
-                alloy_provider::ProviderBuilder::new().on_http(l1_http_endpoint.parse().unwrap());
-            let quorum_nums = [0];
-            let quorum_threshold_percentages = vec![100_u8];
-            let time_to_expiry = Duration::from_secs(10);
-
-            let (mut notification_client, mut connection) =
-                tokio_postgres::connect(&postgres_connect_request, NoTls)
+            loop {
+                let client = pool.get().await.unwrap();
+                let l2_ws_connect = alloy_provider::WsConnect::new(l2_ws_endpoint.clone());
+                let l2_ws_provider = alloy_provider::ProviderBuilder::new()
+                    .on_ws(l2_ws_connect)
                     .await
                     .unwrap();
-            let (tx, rx) = futures_channel::mpsc::unbounded();
-            let stream =
-                stream::poll_fn(move |cx| connection.poll_message(cx)).map_err(|e| panic!("{}", e));
-            let connection = stream.forward(tx).map(|r| r.unwrap());
-            tokio::spawn(connection);
-            let mut notification_filter = rx.filter_map(|m| match m {
-                AsyncMessage::Notification(n) => futures_util::future::ready(Some(n)),
-                _ => futures_util::future::ready(None),
-            });
+                let l1_http_provider = alloy_provider::ProviderBuilder::new()
+                    .on_http(l1_http_endpoint.parse().unwrap());
+                let quorum_nums = [0];
+                let quorum_threshold_percentages = vec![100_u8];
+                let time_to_expiry = Duration::from_secs(10);
 
-            loop {
                 match client
                     .query_one(
                         "UPDATE issued_tasks 
@@ -1424,17 +1409,26 @@ fn new_task_issued_handler_l2(
                     }
                     Err(_) => {
                         println!("Waiting for new L2 tasks...");
+                        let (notification_client, mut connection) =
+                            tokio_postgres::connect(&postgres_connect_request, NoTls)
+                                .await
+                                .unwrap();
+                        let (tx, rx) = futures_channel::mpsc::unbounded();
+                        let stream = stream::poll_fn(move |cx| connection.poll_message(cx))
+                            .map_err(|e| panic!("{}", e));
+                        let connection = stream.forward(tx).map(|r| r.unwrap());
+                        tokio::spawn(connection);
+                        let mut notification_filter = rx.filter_map(|m| match m {
+                            AsyncMessage::Notification(n) => futures_util::future::ready(Some(n)),
+                            _ => futures_util::future::ready(None),
+                        });
+
                         match notification_client
                             .batch_execute("LISTEN new_task_issued;")
                             .await
                         {
                             Ok(_) => {}
-                            Err(_) => {
-                                (notification_client, _) =
-                                    tokio_postgres::connect(&postgres_connect_request, NoTls)
-                                        .await
-                                        .unwrap();
-                            }
+                            Err(_) => {}
                         }
                         notification_filter.next().await;
                     }
