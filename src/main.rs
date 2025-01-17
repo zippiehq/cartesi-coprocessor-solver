@@ -805,29 +805,18 @@ async fn handle_task_issued_operator(
                     .header("X-Ruleset", &ruleset)
                     .header("X-Max-Ops", max_ops)
                     .uri(format!("{}/classic/{:x}", socket, stream_event.machineHash))
-                    .body(Body::from(stream_event.input.to_vec()))
-                    .unwrap();
+                    .body(Body::from(stream_event.input.to_vec()))?;
                 println!("{}/classic/{:x}", socket, stream_event.machineHash);
                 let client = Client::new();
-                let response = client.request(request).await.unwrap();
+                let response = client.request(request).await?;
                 let response_json = serde_json::from_slice::<serde_json::Value>(
-                    &hyper::body::to_bytes(response)
-                        .await
-                        .expect(
-                            format!(
-                                "No respose for {}/classic/{:x}",
-                                socket, stream_event.machineHash,
-                            )
-                            .as_str(),
-                        )
-                        .to_vec(),
-                )
-                .unwrap();
+                    &hyper::body::to_bytes(response).await?.to_vec(),
+                )?;
 
                 let response_signature: String = match response_json.get("signature") {
                     Some(serde_json::Value::String(sign)) => sign.to_string(),
                     _ => {
-                        panic!("No signature found in request response");
+                        return Err(format!("No signature found in request response").into());
                     }
                 };
 
@@ -844,17 +833,17 @@ async fn handle_task_issued_operator(
                             }
                         }
                         _ => {
-                            panic!("No finish_callback found in request response");
+                            return Err(format!("No finish_callback found in request response").into());
                         }
                     };
                 let finish_result = extract_number_array(finish_callback);
                 let outputs_vector: Vec<(u16, Vec<u8>)> =
                     match response_json.get("outputs_callback_vector") {
                         Some(outputs_callback) => {
-                            serde_json::from_value(outputs_callback.clone()).unwrap()
+                            serde_json::from_value(outputs_callback.clone())?
                         }
                         _ => {
-                            panic!("No outputs_callback_vector found in request response");
+                            return Err(format!("No outputs_callback_vector found in request response").into());
                         }
                     };
                 if generate_proofs {
@@ -866,21 +855,20 @@ async fn handle_task_issued_operator(
                         keccak_outputs.push(hasher.finalize());
                     }
 
-                    let proofs = outputs_merkle::create_proofs(keccak_outputs, HEIGHT).unwrap();
+                    let proofs = outputs_merkle::create_proofs(keccak_outputs, HEIGHT)?;
 
                     if proofs.0.to_vec() != finish_result {
                         return Err(format!("Outputs weren't proven successfully").into());
                     }
                 }
 
-                let signature_bytes = hex::decode(&response_signature).unwrap();
+                let signature_bytes = hex::decode(&response_signature)?;
                 println!("signature_bytes {:?}", signature_bytes);
                 let g1: ark_bn254::g1::G1Affine =
-                    ark_bn254::g1::G1Affine::deserialize_uncompressed(&signature_bytes[..])
-                        .unwrap();
+                    ark_bn254::g1::G1Affine::deserialize_uncompressed(&signature_bytes[..])?;
 
                 let mut task_response_buffer = vec![0u8; 12];
-                task_response_buffer.extend_from_slice(&hex::decode(&ruleset).unwrap());
+                task_response_buffer.extend_from_slice(&hex::decode(&ruleset)?);
                 task_response_buffer.extend_from_slice(&stream_event.machineHash.to_vec());
 
                 let mut hasher = Keccak256::new();
@@ -900,8 +888,7 @@ async fn handle_task_issued_operator(
                         quorum_threshold_percentages.clone(),
                         time_to_expiry,
                     )
-                    .await
-                    .unwrap();
+                    .await?;
 
                 bls_agg_service
                     .process_new_signature(
@@ -910,8 +897,7 @@ async fn handle_task_issued_operator(
                         Signature::new(g1),
                         operator_id.into(),
                     )
-                    .await
-                    .unwrap();
+                    .await?;
 
                 response_digest_map.insert(
                     B256::from_slice(task_response_digest.as_slice()),
@@ -919,7 +905,7 @@ async fn handle_task_issued_operator(
                 );
             }
             None => {
-                eprint!("No socket for operator_id {:?}", hex::encode(operator_id));
+                return Err(format!("No socket for operator_id {:?}", hex::encode(operator_id)).into());
             }
         }
     }
