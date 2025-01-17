@@ -33,7 +33,7 @@ use hyper::{
     service::{make_service_fn, service_fn},
     Body, Client, Request, Response, Server, StatusCode, Uri,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::io::Bytes;
 use std::str::FromStr;
@@ -52,6 +52,30 @@ use alloy_provider::fillers::{
 };
 use futures_util::stream;
 use tokio_postgres::types::{FromSql, ToSql};
+use std::env;
+use serde_json::json;
+
+use s3::error::S3Error;
+// use s3::signature::PresigningParams;
+use s3::{Bucket, Region};
+use s3::creds::Credentials;
+use uuid::Uuid;
+
+fn generate_upload_id() -> String {
+    Uuid::new_v4().to_string()
+}
+
+#[derive(Serialize)]
+struct UploadResponse {
+    upload_id: String,
+    presigned_url: String,
+}
+
+async fn generate_presigned_url(bucket: &Arc<Mutex<Bucket>>, key: &str, expires_in: Duration) -> Result<String, S3Error> {
+    let bucket = bucket.lock().await;
+    let presigned_url = bucket.presign_put(key, expires_in.as_secs() as u32, None, None).await?;
+    Ok(presigned_url)
+}
 
 const HEIGHT: usize = 63;
 const TASK_INDEX: u32 = 1;
@@ -154,6 +178,35 @@ async fn main() {
         .unwrap();
 
     println!("Starting solver..");
+
+    let upload_dir = env::var("UPLOAD_DIR").unwrap_or_else(|_| "./uploads".to_string());
+    println!("Files will be uploaded to: {}", upload_dir);
+    tokio::fs::create_dir_all(&upload_dir).await.unwrap();
+
+    // S3 environment variables
+    let bucket_name = env::var("BUCKET_NAME").expect("BUCKET_NAME not set");
+    let aws_endpoint_url_s3 = env::var("AWS_ENDPOINT_URL_S3").expect("AWS_ENDPOINT_URL_S3 not set");
+    let aws_access_key_id = env::var("AWS_ACCESS_KEY_ID").expect("AWS_ACCESS_KEY_ID not set");
+    let aws_secret_access_key = env::var("AWS_SECRET_ACCESS_KEY").expect("AWS_SECRET_ACCESS_KEY not set");
+
+    // S3 client
+    let credentials = Credentials::new(
+        Some(&aws_access_key_id),
+        Some(&aws_secret_access_key),
+        None,
+        None,
+        None,
+    ).expect("Failed to create AWS credentials");
+
+    let region = Region::Custom {
+        region: "us-east-1".to_string(),
+        endpoint: aws_endpoint_url_s3.clone(),
+    };
+
+    let bucket = Bucket::new(&bucket_name, region, credentials)
+        .expect("Failed to create S3 bucket client");
+    let bucket = Arc::new(Mutex::new(bucket));
+
     let arc_ws_endpoint = Arc::new(config.l1_ws_endpoint.clone());
 
     let tracing_logger =
@@ -603,6 +656,35 @@ async fn main() {
                                 }
                             }
                         }
+                        (hyper::Method::POST, ["upload"]) => {
+                            let upload_id = generate_upload_id();
+                            let object_key = format!("uploads/{}", upload_id);
+                            match generate_presigned_url(&bucket, &object_key, Duration::from_secs(3600)).await {
+                                Ok(presigned_url) => {
+                                    let response = UploadResponse {
+                                        upload_id,
+                                        presigned_url
+                                    };
+                                    let json_response = serde_json::to_string(&response).unwrap();
+                                    Ok(Response::builder()
+                                        .status(StatusCode::OK)
+                                        .header("Content-Type", "application/json")
+                                        .body(Body::from(json_response))
+                                        .unwrap())
+                                },
+                                Err(err) => {
+                                    let json_error = json!({
+                                        "error": format!("Failed to generate presigned URL: {}", err)
+                                    });
+                                    let json_error = serde_json::to_string(&json_error).unwrap();
+                                    Ok(Response::builder()
+                                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                        .header("Content-Type", "application/json")
+                                        .body(Body::from(json_error))
+                                        .unwrap())
+                                }
+                            }
+                        }
                         (hyper::Method::GET, ["health"]) => {
                             let json_request = r#"{"healthy": "true"}"#;
                             let response = Response::new(Body::from(json_request));
@@ -998,21 +1080,21 @@ fn new_task_issued_handler_l1(
             loop {
                 match client
                     .query_one(
-                        "UPDATE issued_tasks 
-                        SET status = $1 
+                        "UPDATE issued_tasks
+                        SET status = $1
                         WHERE id = (
-                            SELECT id 
-                            FROM issued_tasks 
-                            WHERE status = $2 OR status = $3 
-                            ORDER BY 
-                                CASE 
-                                    WHEN status = $2 THEN 1 
-                                    WHEN status = $3 THEN 2 
-                                    ELSE 3 
-                                END, 
+                            SELECT id
+                            FROM issued_tasks
+                            WHERE status = $2 OR status = $3
+                            ORDER BY
+                                CASE
+                                    WHEN status = $2 THEN 1
+                                    WHEN status = $3 THEN 2
+                                    ELSE 3
+                                END,
                                 id DESC
                             LIMIT 1
-                        ) 
+                        )
                         RETURNING *;",
                         &[
                             &task_status::in_progress,
@@ -1226,21 +1308,21 @@ fn new_task_issued_handler_l2(
             loop {
                 match client
                     .query_one(
-                        "UPDATE issued_tasks 
-                        SET status = $1 
+                        "UPDATE issued_tasks
+                        SET status = $1
                         WHERE id = (
-                            SELECT id 
-                            FROM issued_tasks 
-                            WHERE status = $2 OR status = $3 
-                            ORDER BY 
-                                CASE 
-                                    WHEN status = $2 THEN 1 
-                                    WHEN status = $3 THEN 2 
-                                    ELSE 3 
-                                END, 
+                            SELECT id
+                            FROM issued_tasks
+                            WHERE status = $2 OR status = $3
+                            ORDER BY
+                                CASE
+                                    WHEN status = $2 THEN 1
+                                    WHEN status = $3 THEN 2
+                                    ELSE 3
+                                END,
                                 id DESC
                             LIMIT 1
-                        ) 
+                        )
                         RETURNING *;",
                         &[
                             &task_status::in_progress,
