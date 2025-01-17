@@ -42,3 +42,6 @@ bb8-postgres = "0.8.1"
 bb8 = "0.8.6"
 futures-channel = "0.3.31"
 postgres-types = {version = "0.2.8", features = ["derive"] }
+rust-s3 = "0.35.1"
+uuid = { version = "1.12.0", features = ["v4"] }
+urlencoding = "2.1.3"

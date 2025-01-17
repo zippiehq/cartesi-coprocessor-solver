@@ -33,7 +33,7 @@ use hyper::{
     service::{make_service_fn, service_fn},
     Body, Client, Request, Response, Server, StatusCode, Uri,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::io::Bytes;
 use std::str::FromStr;
@@ -52,6 +52,15 @@ use alloy_provider::fillers::{
 };
 use futures_util::stream;
 use tokio_postgres::types::{FromSql, ToSql};
+use std::env;
+use serde_json::json;
+
+use s3::error::S3Error;
+// use s3::signature::PresigningParams;
+use s3::{Bucket, Region};
+use s3::creds::Credentials;
+use uuid::Uuid;
+use urlencoding::encode;
 
 const HEIGHT: usize = 63;
 const TASK_INDEX: u32 = 1;
@@ -154,6 +163,7 @@ async fn main() {
         .unwrap();
 
     println!("Starting solver..");
+
     let arc_ws_endpoint = Arc::new(config.l1_ws_endpoint.clone());
 
     let tracing_logger =
@@ -603,6 +613,331 @@ async fn main() {
                                 }
                             }
                         }
+                        (hyper::Method::POST, ["upload"]) => {
+                            fn generate_upload_id() -> String {
+                                Uuid::new_v4().to_string()
+                            }
+
+                            #[derive(Serialize)]
+                            struct UploadResponse {
+                                upload_id: String,
+                                presigned_url: String,
+                            }
+
+                            async fn generate_presigned_url(
+                                bucket: &Arc<Mutex<Box<Bucket>>>,
+                                key: &str,
+                                expires_in: Duration
+                            ) -> Result<String, S3Error> {
+                                let bucket = bucket.lock().await;
+                                let presigned_url = bucket.presign_put(key, expires_in.as_secs() as u32, None, None).await?;
+                                Ok(presigned_url)
+                            }
+
+                            let upload_dir = env::var("UPLOAD_DIR").unwrap_or_else(|_| "./uploads".to_string());
+                            println!("Files will be uploaded to: {}", upload_dir);
+                            tokio::fs::create_dir_all(&upload_dir).await.unwrap();
+
+                            // S3 environment variables
+                            let bucket_name = env::var("BUCKET_NAME").expect("BUCKET_NAME not set");
+                            let aws_endpoint_url_s3 = env::var("AWS_ENDPOINT_URL_S3").expect("AWS_ENDPOINT_URL_S3 not set");
+                            let aws_access_key_id = env::var("AWS_ACCESS_KEY_ID").expect("AWS_ACCESS_KEY_ID not set");
+                            let aws_secret_access_key = env::var("AWS_SECRET_ACCESS_KEY").expect("AWS_SECRET_ACCESS_KEY not set");
+
+                            // S3 client
+                            let credentials = Credentials::new(
+                                Some(&aws_access_key_id),
+                                Some(&aws_secret_access_key),
+                                None,
+                                None,
+                                None,
+                            ).expect("Failed to create AWS credentials");
+
+                            let region = Region::Custom {
+                                region: "us-east-1".to_string(),
+                                endpoint: aws_endpoint_url_s3.clone(),
+                            };
+
+                            let bucket = Bucket::new(&bucket_name, region, credentials)
+                                .expect("Failed to create S3 bucket client");
+                            let bucket = Arc::new(Mutex::new(bucket));
+                            let upload_id = generate_upload_id();
+                            let object_key = format!("uploads/{}", upload_id);
+                            match generate_presigned_url(&bucket, &object_key, Duration::from_secs(3600)).await {
+                                Ok(presigned_url) => {
+                                    let response = UploadResponse {
+                                        upload_id,
+                                        presigned_url
+                                    };
+                                    let json_response = serde_json::to_string(&response).unwrap();
+                                    Ok(Response::builder()
+                                        .status(StatusCode::OK)
+                                        .header("Content-Type", "application/json")
+                                        .body(Body::from(json_response))
+                                        .unwrap())
+                                },
+                                Err(err) => {
+                                    let json_error = json!({
+                                        "error": format!("Failed to generate presigned URL: {}", err)
+                                    });
+                                    let json_error = serde_json::to_string(&json_error).unwrap();
+                                    Ok(Response::builder()
+                                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                        .header("Content-Type", "application/json")
+                                        .body(Body::from(json_error))
+                                        .unwrap())
+                                }
+                            }
+                        }
+                        (hyper::Method::POST, ["publish", publish_id]) => {
+                            let bucket_name = env::var("BUCKET_NAME").expect("BUCKET_NAME not set");
+                            let aws_endpoint_url_s3 = env::var("AWS_ENDPOINT_URL_S3").expect("AWS_ENDPOINT_URL_S3 not set");
+                            let aws_access_key_id = env::var("AWS_ACCESS_KEY_ID").expect("AWS_ACCESS_KEY_ID not set");
+                            let aws_secret_access_key = env::var("AWS_SECRET_ACCESS_KEY").expect("AWS_SECRET_ACCESS_KEY not set");
+
+                            // S3 client
+                            let credentials = Credentials::new(
+                                Some(&aws_access_key_id),
+                                Some(&aws_secret_access_key),
+                                None,
+                                None,
+                                None,
+                            ).expect("Failed to create AWS credentials");
+
+                            let region = Region::Custom {
+                                region: "us-east-1".to_string(),
+                                endpoint: aws_endpoint_url_s3.clone(),
+                            };
+
+                            let bucket = Bucket::new(&bucket_name, region, credentials)
+                                .expect("Failed to create S3 bucket client");
+                            let old_key = format!("uploads/{}", publish_id);
+                            //let bucket_guard = bucket.lock().await;
+                            match bucket.head_object(&old_key).await {
+                                Ok((object_meta, _)) => {
+                                    if object_meta.content_length.unwrap_or(0) < 1 {
+                                        let json_error = serde_json::json!({
+                                            "error": "File is zero-length or not found"
+                                        });
+                                        let body = serde_json::to_string(&json_error).unwrap();
+                                        return Ok(Response::builder()
+                                            .status(StatusCode::BAD_REQUEST)
+                                            .header("Content-Type", "application/json")
+                                            .body(Body::from(body))
+                                            .unwrap());
+                                    }
+                                }
+                                Err(e) => {
+                                    let json_error = serde_json::json!({
+                                        "error": format!("head_object failed: {:?}", e)
+                                    });
+                                    let body = serde_json::to_string(&json_error).unwrap();
+                                    return Ok(Response::builder()
+                                        .status(StatusCode::NOT_FOUND)
+                                        .header("Content-Type", "application/json")
+                                        .body(Body::from(body))
+                                        .unwrap());
+                                }
+                            }
+
+                            let new_key = format!("files/{}", publish_id);
+                            if let Err(copy_err) = bucket.copy_object_internal(&old_key, &new_key).await {
+                                let json_error = serde_json::json!({
+                                    "error": format!("copy_object failed: {:?}", copy_err)
+                                });
+                                let body = serde_json::to_string(&json_error).unwrap();
+                                return Ok(Response::builder()
+                                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                    .header("Content-Type", "application/json")
+                                    .body(Body::from(body))
+                                    .unwrap());
+                            }
+                            if let Err(del_err) = bucket.delete_object(&old_key).await {
+                                let json_error = serde_json::json!({
+                                    "error": format!("delete_object failed: {:?}", del_err)
+                                });
+                                let body = serde_json::to_string(&json_error).unwrap();
+                                return Ok(Response::builder()
+                                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                    .header("Content-Type", "application/json")
+                                    .body(Body::from(body))
+                                    .unwrap());
+                            }
+
+                            let presigned_url: String = match bucket.presign_get(&new_key, 3600, None).await {
+                                Ok(url) => url,
+                                Err(err) => {
+                                    let json_error = serde_json::json!({
+                                        "error": format!("presign_get failed: {:?}", err)
+                                    });
+                                    let body = serde_json::to_string(&json_error).unwrap();
+                                    return Ok(Response::builder()
+                                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                        .header("Content-Type", "application/json")
+                                        .body(Body::from(body))
+                                        .unwrap());
+                                }
+                            };
+
+                            drop(bucket);
+
+                            let ws_connect = alloy_provider::WsConnect::new(ws_endpoint.clone());
+                            let ws_provider = alloy_provider::ProviderBuilder::new()
+                                .on_ws(ws_connect)
+                                .await
+                                .unwrap();
+                            let current_block_number = ws_provider.clone().get_block_number().await.unwrap();
+                            let quorum_nums = [0];
+
+                            let mut publish_results: Vec<serde_json::Value> = Vec::new();
+                            let http_client = Client::new();
+
+                            match avs_registry_service
+                                .clone()
+                                .get_operators_avs_state_at_block(current_block_number as u32, &quorum_nums)
+                                .await
+                            {
+                                Ok(operators) => {
+                                    for operator in operators {
+                                        let operator_id = operator.1.operator_id;
+
+                                        let mut socket_url = {
+                                            let map_guard = sockets_map.lock().await;
+                                            map_guard
+                                                .get(&operator_id.to_vec())
+                                                .cloned()
+                                                .unwrap_or_else(|| "Not Needed".to_string())
+                                        };
+                                        if socket_url == "Not Needed" {
+                                            socket_url = config_socket.clone();
+                                        }
+
+                                        let url_encoded = encode(&presigned_url);
+                                        let operator_endpoint = format!("{}/upload?url={}&upload_id={}", socket_url, url_encoded, publish_id);
+
+                                        let req = Request::builder()
+                                            .method("POST")
+                                            .uri(operator_endpoint)
+                                            .body(Body::empty())
+                                            .unwrap();
+
+                                        match http_client.request(req).await {
+                                            Ok(resp) => {
+                                                let status = resp.status();
+                                                let body_bytes = hyper::body::to_bytes(resp).await.unwrap_or_default();
+                                                let body_str = String::from_utf8_lossy(&body_bytes).to_string();
+                                                publish_results.push(json!({
+                                                    "operator_id": hex::encode(operator_id.to_vec()),
+                                                    "status_code": status.as_u16(),
+                                                    "response_body": body_str
+                                                }));
+                                            }
+                                            Err(e) => {
+                                                publish_results.push(json!({
+                                                    "operator_id": hex::encode(operator_id.to_vec()),
+                                                    "error": format!("POST to operator failed: {:?}", e)
+                                                }));
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    let json_error = serde_json::json!({
+                                        "error": format!("Failed to get operators: {:?}", err)
+                                    });
+                                    let body = serde_json::to_string(&json_error).unwrap();
+                                    return Ok(Response::builder()
+                                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                        .header("Content-Type", "application/json")
+                                        .body(Body::from(body))
+                                        .unwrap());
+                                }
+                            }
+
+                            let body_json = serde_json::json!({
+                                "presigned_get_url": presigned_url,
+                                "publish_results": publish_results
+                            });
+                            let body_str = serde_json::to_string(&body_json).unwrap();
+                            Ok(Response::builder()
+                                .status(StatusCode::OK)
+                                .header("Content-Type", "application/json")
+                                .body(Body::from(body_str))
+                                .unwrap())
+                        }
+
+                        (hyper::Method::GET, ["publish_status", publish_id]) => {
+                            let ws_connect = alloy_provider::WsConnect::new(ws_endpoint);
+                            let ws_provider = alloy_provider::ProviderBuilder::new()
+                                .on_ws(ws_connect)
+                                .await
+                                .expect("Failed to connect to WS provider");
+                            let current_block_number = ws_provider.get_block_number().await
+                                .expect("Failed to get current block number");
+
+                            let quorum_nums = [0];
+                            let operators = avs_registry_service.clone()
+                                .get_operators_avs_state_at_block(current_block_number as u32, &quorum_nums)
+                                .await
+                                .expect("Failed to get operators");
+
+                            let http_client = Client::new();
+                            let mut publish_results: Vec<serde_json::Value> = Vec::new();
+
+                            for operator in operators {
+                                let operator_id = operator.1.operator_id;
+                                let operator_id_hex = hex::encode(&operator_id.to_vec());
+
+                                let socket_url = {
+                                    let map_guard = sockets_map.lock().await;
+                                    map_guard.get(&operator_id.to_vec())
+                                        .cloned()
+                                        .unwrap_or_else(|| "Not Needed".to_string())
+                                };
+
+                                let operator_endpoint = format!("{}/publish_status/{}", socket_url, publish_id);
+
+                                let request = Request::builder()
+                                    .method("GET")
+                                    .uri(operator_endpoint)
+                                    .body(Body::empty())
+                                    .expect("Failed to build request");
+
+                                match http_client.request(request).await {
+                                    Ok(resp) => {
+                                        let status = resp.status();
+                                        let body_bytes = hyper::body::to_bytes(resp).await
+                                            .expect("Failed to read response body");
+                                        let body_str = String::from_utf8(body_bytes.to_vec())
+                                            .expect("Response body is not valid UTF-8");
+                                        publish_results.push(json!({
+                                            "operator_id": operator_id_hex,
+                                            "status_code": status.as_u16(),
+                                            "response_body": body_str,
+                                        }));
+                                    }
+                                    Err(e) => {
+                                        publish_results.push(json!({
+                                            "operator_id": operator_id_hex,
+                                            "error": format!("Request failed: {:?}", e),
+                                            "status_code": 0,
+                                        }));
+                                    }
+                                }
+                            }
+                            let response_body = serde_json::json!({
+                                "publish_id": publish_id,
+                                "publish_results": publish_results
+                            });
+                            let response_body = serde_json::to_string(&response_body).unwrap();
+
+                            Ok(Response::builder()
+                                .status(StatusCode::OK)
+                                .header("Content-Type", "application/json")
+                                .body(Body::from(response_body))
+                                .unwrap())
+                        }
+
                         (hyper::Method::GET, ["health"]) => {
                             let json_request = r#"{"healthy": "true"}"#;
                             let response = Response::new(Body::from(json_request));
