@@ -968,28 +968,11 @@ fn new_task_issued_handler_l1(
             loop {
                 let client = pool.get().await.unwrap();
                 match client
-                    .query_one(
-                        "UPDATE issued_tasks 
-                        SET status = $1 
-                        WHERE id = (
-                            SELECT id 
-                            FROM issued_tasks 
-                            WHERE status = $2 OR status = $3 
-                            ORDER BY 
-                                CASE 
-                                    WHEN status = $2 THEN 1 
-                                    WHEN status = $3 THEN 2 
-                                    ELSE 3 
-                                END, 
-                                id DESC
-                            LIMIT 1
-                        ) 
-                        RETURNING *;",
-                        &[
-                            &task_status::in_progress,
-                            &task_status::in_progress,
-                            &task_status::waits_for_handling,
-                        ],
+                    .query_one("UPDATE issued_tasks SET status = $1 WHERE id = ( SELECT id FROM issued_tasks WHERE status = $2 ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING *;",
+                &[
+                    &task_status::in_progress,
+                    &task_status::waits_for_handling,
+                ],
                     )
                     .await
                 {
@@ -1009,7 +992,7 @@ fn new_task_issued_handler_l1(
                             .on_ws(ws_connect)
                             .await
                             .unwrap();
-            
+
                         let current_block_number =
                             ws_provider.clone().get_block_number().await.unwrap();
                         match avs_registry_service
@@ -1150,8 +1133,7 @@ fn new_task_issued_handler_l1(
                             .await
                         {
                             Ok(_) => {}
-                            Err(_) => {
-                            }
+                            Err(_) => {}
                         }
                         notification_filter.next().await;
                     }
@@ -1213,24 +1195,8 @@ fn new_task_issued_handler_l2(
             loop {
                 match client
                     .query_one(
-                        "UPDATE issued_tasks 
-                        SET status = $1 
-                        WHERE id = (
-                            SELECT id 
-                            FROM issued_tasks 
-                            WHERE status = $2 OR status = $3 
-                            ORDER BY 
-                                CASE 
-                                    WHEN status = $2 THEN 1 
-                                    WHEN status = $3 THEN 2 
-                                    ELSE 3 
-                                END, 
-                                id DESC
-                            LIMIT 1
-                        ) 
-                        RETURNING *;",
+                        "UPDATE issued_tasks SET status = $1 WHERE id = ( SELECT id FROM issued_tasks WHERE status = $2 ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING *;",
                         &[
-                            &task_status::in_progress,
                             &task_status::in_progress,
                             &task_status::waits_for_handling,
                         ],
