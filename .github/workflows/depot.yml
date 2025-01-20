@@ -95,7 +95,7 @@ jobs:
             run: |
                 docker pull ${{ env.REGISTRY }}/${{ github.repository }}:latest
                 DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' ${{ env.REGISTRY }}/${{ github.repository }}:latest)
-                flyctl image update --app ${{ env.APP_NAME }} --image ${{ env.REGISTRY }}/${{ github.repository }}@$DIGEST --yes
+                flyctl image update --app ${{ env.APP_NAME }} --image ${{ env.REGISTRY }}/${{ github.repository }}:latest@$DIGEST --yes
             env:
                 REGISTRY: ${{ env.REGISTRY }}
                 GITHUB_REPOSITORY: ${{ github.repository }}
