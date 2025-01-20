@@ -89,13 +89,13 @@ jobs:
           - name: Authenticate with Fly.io
             env:
                 FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-            run: fly auth token
+            run: flyctl auth token
           - name: Update Fly Machines with updated Image
             if: ${{ github.ref == 'refs/heads/main' }}
             run: |
                 docker pull ${{ secrets.REGISTRY }}/${{ github.repository }}:latest
                 DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' ${{ secrets.REGISTRY }}/${{ github.repository }}:latest)
-                fly image update --app ${{ env.APP_NAME }} --image ${{ secrets.REGISTRY }}/${{ github.repository }}@$DIGEST --yes
+                flyctl image update --app ${{ env.APP_NAME }} --image ${{ secrets.REGISTRY }}/${{ github.repository }}@$DIGEST --yes
             env:
                 REGISTRY: ${{ secrets.REGISTRY }}
                 GITHUB_REPOSITORY: ${{ github.repository }}
