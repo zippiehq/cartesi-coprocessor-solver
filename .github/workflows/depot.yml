@@ -97,5 +97,6 @@ jobs:
                 DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' ${{ env.REGISTRY }}/${{ github.repository }}:latest)
                 flyctl image update --app ${{ env.APP_NAME }} --image ${{ env.REGISTRY }}/${{ github.repository }}:latest@$DIGEST --yes
             env:
+                APP_NAME: cartesi-coprocessor-solver-dev
                 REGISTRY: ${{ env.REGISTRY }}
                 GITHUB_REPOSITORY: ${{ github.repository }}
