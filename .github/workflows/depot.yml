@@ -91,7 +91,7 @@ jobs:
             run: |
                 docker pull ${{ env.REGISTRY }}/${{ github.repository }}:latest
                 DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' ${{ env.REGISTRY }}/${{ github.repository }}:latest)
-                flyctl image update --app ${{ env.APP_NAME }} --image ${{ env.REGISTRY }}/${{ github.repository }}:latest@$DIGEST --yes
+                flyctl image update --app ${{ env.APP_NAME }} --image $DIGEST --yes
             env:
                 FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
                 APP_NAME: cartesi-coprocessor-solver-dev
