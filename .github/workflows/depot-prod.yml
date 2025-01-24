@@ -1,0 +1,79 @@
+name: solver
+
+on:
+    push:
+        tags:
+            - "v*"
+
+env:
+    REGISTRY: ghcr.io
+
+jobs:
+    build:
+        name: Depot Build
+        runs-on: depot-ubuntu-22.04-4
+        strategy:
+            matrix:
+                arch: [amd64, arm64]
+        steps:
+            - name: Checkout Repository
+              uses: actions/checkout@v2
+            - name: Login to Github Container Registry (GHCR)
+              uses: docker/login-action@v2
+              with:
+                  registry: ${{ env.REGISTRY }}
+                  username: ${{ github.actor }}
+                  password: ${{ secrets.GITHUB_TOKEN }}
+            - name: Setup Depot CLI
+              uses: depot/setup-action@v1
+              env:
+                  DEPOT_TOKEN: ${{ secrets.DEPOT_API_TOKEN }}
+            - name: Build and Push Docker Image with Depot
+              run: |
+                  depot build . \
+                    --project hs0gfs4l0l \
+                    --file Dockerfile \
+                    --tag ${{ env.REGISTRY }}/${{ github.repository }}:${{ matrix.arch }}-${{ github.ref_name }} \
+                    --platform linux/${{ matrix.arch }} \
+                    --build-arg ARCH=${{ matrix.arch }} \
+                    --cache-from type=gha,scope=build-${{ matrix.arch }} \
+                    --cache-to type=gha,mode=max,scope=build-${{ matrix.arch }} \
+                    --load
+                  if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+                    docker push ${{ env.REGISTRY }}/${{ github.repository }}:${{ matrix.arch }}-${{ github.ref_name }}
+                  fi
+              env:
+                  DEPOT_TOKEN: ${{ secrets.DEPOT_API_TOKEN }}
+
+    manifest:
+        name: Create and Push Multi-Architecture Manifest
+        runs-on: ubuntu-latest
+        needs: build
+        steps:
+            - name: Setup Docker Buildx
+              uses: docker/setup-buildx-action@v1
+            - name: Install jq
+              run: sudo apt-get install -y jq
+            - name: Login to Docker Registry
+              uses: docker/login-action@v2
+              with:
+                  registry: ${{ env.REGISTRY }}
+                  username: ${{ github.actor }}
+                  password: ${{ secrets.GITHUB_TOKEN }}
+            - name: Create and Push Docker Manifest
+              if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+              run: |
+                  docker pull --platform linux/amd64 ${{ env.REGISTRY }}/${{ github.repository }}:amd64-${{ github.ref_name }}
+                  docker pull --platform linux/arm64 ${{ env.REGISTRY }}/${{ github.repository }}:arm64-${{ github.ref_name }}
+
+                  docker manifest create ${{ env.REGISTRY }}/${{ github.repository }}:${{ github.ref_name }} \
+                    --amend ${{ env.REGISTRY }}/${{ github.repository }}:amd64-${{ github.ref_name }} \
+                    --amend ${{ env.REGISTRY }}/${{ github.repository }}:arm64-${{ github.ref_name }}
+
+                  docker manifest annotate ${{ env.REGISTRY }}/${{ github.repository }}:${{ github.ref_name }} ${{ env.REGISTRY }}/${{ github.repository }}:amd64-${{ github.ref_name }} --arch amd64
+                  docker manifest annotate ${{ env.REGISTRY }}/${{ github.repository }}:${{ github.ref_name }} ${{ env.REGISTRY }}/${{ github.repository }}:arm64-${{ github.ref_name }} --arch arm64
+
+                  docker manifest push ${{ env.REGISTRY }}/${{ github.repository }}:${{ github.ref_name }}
+        env:
+            DOCKER_CLI_EXPERIMENTAL: enabled
+    
