@@ -1,4 +1,4 @@
-name: solver
+name: main
 
 on:
     push:

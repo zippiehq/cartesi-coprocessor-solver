@@ -1,4 +1,4 @@
-name: solver
+name: testing branch
 
 on:
     push:

@@ -1,4 +1,4 @@
-name: solver
+name: prod tags
 
 on:
     push:
