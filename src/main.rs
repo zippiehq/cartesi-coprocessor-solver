@@ -689,7 +689,7 @@ async fn main() {
                                 }
                             }
                         }
-                        (hyper::Method::POST, ["publish", publish_id]) => {
+                        (hyper::Method::POST, ["publish", upload_id]) => {
                             let bucket_name = env::var("BUCKET_NAME").expect("BUCKET_NAME not set");
                             let aws_endpoint_url_s3 = env::var("AWS_ENDPOINT_URL_S3").expect("AWS_ENDPOINT_URL_S3 not set");
                             let aws_access_key_id = env::var("AWS_ACCESS_KEY_ID").expect("AWS_ACCESS_KEY_ID not set");
@@ -711,7 +711,7 @@ async fn main() {
 
                             let bucket = Bucket::new(&bucket_name, region, credentials)
                                 .expect("Failed to create S3 bucket client");
-                            let old_key = format!("uploads/{}", publish_id);
+                            let old_key = format!("uploads/{}", upload_id);
                             //let bucket_guard = bucket.lock().await;
                             match bucket.head_object(&old_key).await {
                                 Ok((object_meta, _)) => {
@@ -740,7 +740,7 @@ async fn main() {
                                 }
                             }
 
-                            let new_key = format!("files/{}", publish_id);
+                            let new_key = format!("files/{}", upload_id);
                             if let Err(copy_err) = bucket.copy_object_internal(&old_key, &new_key).await {
                                 let json_error = serde_json::json!({
                                     "error": format!("copy_object failed: {:?}", copy_err)
@@ -812,13 +812,19 @@ async fn main() {
                                             socket_url = config_socket.clone();
                                         }
 
-                                        let url_encoded = encode(&presigned_url);
-                                        let operator_endpoint = format!("{}/upload?url={}&upload_id={}", socket_url, url_encoded, publish_id);
+                                       // let url_encoded = encode(&presigned_url);
+                                        let operator_endpoint = format!("{}/upload/{}", socket_url, upload_id);
+
+                                        let body_json = serde_json::json!({
+                                            "presigned_url": presigned_url,
+                                            "upload_id": upload_id
+                                        });
+                                        let body_bytes = Body::from(body_json.to_string());
 
                                         let req = Request::builder()
                                             .method("POST")
                                             .uri(operator_endpoint)
-                                            .body(Body::empty())
+                                            .body(body_bytes)
                                             .unwrap();
 
                                         match http_client.request(req).await {
@@ -866,7 +872,7 @@ async fn main() {
                                 .unwrap())
                         }
 
-                        (hyper::Method::GET, ["publish_status", publish_id]) => {
+                        (hyper::Method::GET, ["publish_status", upload_id]) => {
                             let ws_connect = alloy_provider::WsConnect::new(ws_endpoint);
                             let ws_provider = alloy_provider::ProviderBuilder::new()
                                 .on_ws(ws_connect)
@@ -895,7 +901,7 @@ async fn main() {
                                         .unwrap_or_else(|| "Not Needed".to_string())
                                 };
 
-                                let operator_endpoint = format!("{}/publish_status/{}", socket_url, publish_id);
+                                let operator_endpoint = format!("{}/publish_status/{}", socket_url, upload_id);
 
                                 let request = Request::builder()
                                     .method("GET")
@@ -926,7 +932,7 @@ async fn main() {
                                 }
                             }
                             let response_body = serde_json::json!({
-                                "publish_id": publish_id,
+                                "upload_id": upload_id,
                                 "publish_results": publish_results
                             });
                             let response_body = serde_json::to_string(&response_body).unwrap();
