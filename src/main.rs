@@ -861,7 +861,6 @@ async fn main() {
                             }
 
                             let body_json = serde_json::json!({
-                                "presigned_get_url": presigned_url,
                                 "publish_results": publish_results
                             });
                             let body_str = serde_json::to_string(&body_json).unwrap();
