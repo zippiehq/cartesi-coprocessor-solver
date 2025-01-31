@@ -37,6 +37,17 @@ echo "$connection_url"
 
 database_url=$(echo "$connection_url" | grep -oP 'DATABASE_URL=.*' | sed 's/DATABASE_URL=//')
 
+# Setting up the storage
+echo "creating a bucket"
+storage_output=$(fly storage create -n cartesi-data -a "$app_name" -o "$organization" | grep ':')
+
+# Extract variable using grep and cut
+AWS_ENDPOINT_URL_S3=$(echo "$storage_output" | grep 'AWS_ENDPOINT_URL_S3' | cut -d':' -f2 | tr -d ' ')
+AWS_ACCESS_KEY_ID=$(echo "$storage_output" | grep 'AWS_ACCESS_KEY_ID' | cut -d':' -f2 | tr -d ' ')
+AWS_SECRET_ACCESS_KEY=$(echo "$storage_output" | grep 'AWS_SECRET_ACCESS_KEY' | cut -d':' -f2 | tr -d ' ')
+BUCKET_NAME=$(echo "$storage_output" | grep 'BUCKET_NAME' | cut -d':' -f2 | tr -d ' ')
+AWS_REGION=$(echo "$storage_output" | grep 'AWS_REGION' | cut -d':' -f2 | tr -d ' ')
+
 #step3.1 payment_phrase
 echo "Generating payment phrase..."
 
@@ -52,6 +63,11 @@ for machine_num in 1 2; do
     echo "Creating machine ${machine_id} for $app_name under organization $organization..."
 
     flyctl machine create "$image" \
+        -e AWS_ENDPOINT_URL_S3=$AWS_ENDPOINT_URL_S3 \
+        -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID \
+        -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY \
+        -e BUCKET_NAME=$BUCKET_NAME \
+        -e AWS_REGION=$AWS_REGION \
         --name "$machine_num" \
         --app "$app_name" \
         --org "$organization" \
