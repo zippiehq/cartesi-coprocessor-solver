@@ -100,18 +100,22 @@ for machine_id in $FIRST_ID $SECOND_ID; do
 
     echo "Wallet for machine ${machine_id} saved to ${wallet_file}."
 
+    filename="deploy_config.${environment}.env"
+
+    . "$filename"
+
     config_file="config.toml.$app_name.$machine_id"
     cat >"$config_file" <<EOF
 l1_http_endpoint = "$http_endpoint"
 l2_http_endpoint = "$http_endpoint"
 l1_ws_endpoint = "$ws_endpoint"
 l2_ws_endpoint = "$ws_endpoint"
-registry_coordinator_address = "0x7e49aCCA334DE567dBbaE9924A70655126f39289"
-operator_state_retriever_address = "0x681007c13805491117D79C741a0dcC6DE5F6c47e"
+registry_coordinator_address = "$registry_coordinator_address"
+operator_state_retriever_address = "$operator_state_retriever_address"
 current_first_block = 3150862
-task_issuer = "0x040aA11898c940FAa11A5bc8458B125ef8d34686"
-callback_address = "0x040aA11898c940FAa11A5bc8458B125ef8d34686"
-ruleset = "040aA11898c940FAa11A5bc8458B125ef8d34686"
+task_issuer = "$task_issuer"
+callback_address = "$callback_address"
+ruleset = "$ruleset"
 socket = "http://operator:3033"
 secret_key = "$wallet_private_key"
 payment_phrase = "$payment_phrase"
