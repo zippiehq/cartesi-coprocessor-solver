@@ -82,7 +82,8 @@ jobs:
     sanity:
       name: Coprocessor sanity check
       needs: manifest
-
+      runs-on: ubuntu-latest
+      
       steps:
       - name: Checkout
         uses: actions/checkout@v3
