@@ -164,7 +164,7 @@ for machine_id in $machine_ids; do
 
     if ! flyctl machine update "$machine_id" \
         --app "$app_name" \
-        --image "ghcr.io/zippiehq/cartesi-coprocessor-solver:latest" \
+        --image "ghcr.io/zippiehq/cartesi-coprocessor-solver:$image_version" \
         --file-secret "/run/secrets/config.toml.${machine_id}=${secret_key}" \
         --skip-start; then
         echo "Error: Failed to update machine ${machine_id}!"
