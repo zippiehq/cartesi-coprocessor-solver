@@ -136,7 +136,7 @@ async fn main() {
         .batch_execute(
             "
         CREATE UNIQUE INDEX IF NOT EXISTS unique_machine_input_callback
-        ON issued_tasks ((machineHash || input || callback))
+        ON issued_tasks ((machineHash || md5(input) || callback))
 ",
         )
         .await
