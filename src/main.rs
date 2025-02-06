@@ -124,7 +124,7 @@ async fn main() {
         CREATE TABLE IF NOT EXISTS issued_tasks (
             id SERIAL PRIMARY KEY,
             machineHash BYTEA,
-            input BLOB NOT NULL,
+            input BYTEA,
             callback BYTEA,
             status task_status
         )
