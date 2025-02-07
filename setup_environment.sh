@@ -24,6 +24,7 @@ db_name="${environment}-db-$(date +%s)"
 echo "Setting up the database..."
 fly postgres create --name "$db_name" \
     --region "cdg" \
+    --vm-size "shared-cpu-1x" --initial-cluster-size 2 \
     --org "$organization" || {
     echo "Error: Failed to create a database"
     exit 1
