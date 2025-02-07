@@ -1,4 +1,4 @@
-# fly.toml app configuration file generated for cartesi-coprocessor-solver on 2024-10-22T20:01:49+02:00
+# fly.toml app configuration file generated for cartesi-coprocessor-solver-prod on 2025-02-07T11:37:57+03:00
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
@@ -23,9 +23,6 @@ primary_region = 'cdg'
     grace_period = '10s'
     method = 'GET'
     path = '/health'
-
-
-  
 
 [[vm]]
   memory = '1gb'

@@ -40,7 +40,8 @@ database_url=$(echo "$connection_url" | grep -oP 'DATABASE_URL=.*' | sed 's/DATA
 
 # Setting up the storage
 echo "creating a bucket"
-storage_output=$(fly storage create -n cartesi-data -a "$app_name" -o "$organization" | grep ':')
+storage_output=$(fly storage create -n cartesi-data-$environment -a "$app_name" -o "$organization" | grep ':')
+echo $storage_output
 
 # Extract variable using grep and cut
 AWS_ENDPOINT_URL_S3=$(echo "$storage_output" | grep 'AWS_ENDPOINT_URL_S3' | cut -d':' -f2 | tr -d ' ')
