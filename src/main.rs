@@ -713,6 +713,7 @@ async fn main() {
                                 .expect("Failed to create S3 bucket client");
                             let old_key = format!("uploads/{}", upload_id);
                             //let bucket_guard = bucket.lock().await;
+                            println!("checking upload exists..");
                             match bucket.head_object(&old_key).await {
                                 Ok((object_meta, _)) => {
                                     if object_meta.content_length.unwrap_or(0) < 1 {
@@ -741,6 +742,7 @@ async fn main() {
                             }
 
                             let new_key = format!("files/{}", upload_id);
+                            println!("copying object..");
                             if let Err(copy_err) = bucket.copy_object_internal(&old_key, &new_key).await {
                                 let json_error = serde_json::json!({
                                     "error": format!("copy_object failed: {:?}", copy_err)
@@ -752,6 +754,7 @@ async fn main() {
                                     .body(Body::from(body))
                                     .unwrap());
                             }
+                            println!("deleting old object..");
                             if let Err(del_err) = bucket.delete_object(&old_key).await {
                                 let json_error = serde_json::json!({
                                     "error": format!("delete_object failed: {:?}", del_err)
@@ -763,7 +766,7 @@ async fn main() {
                                     .body(Body::from(body))
                                     .unwrap());
                             }
-
+                            println!("getting presigned url..");
                             let presigned_url: String = match bucket.presign_get(&new_key, 3600, None).await {
                                 Ok(url) => url,
                                 Err(err) => {
@@ -780,6 +783,8 @@ async fn main() {
                             };
 
                             drop(bucket);
+                            
+                            println!("finding operator set");
 
                             let ws_connect = alloy_provider::WsConnect::new(ws_endpoint.clone());
                             let ws_provider = alloy_provider::ProviderBuilder::new()
@@ -810,7 +815,7 @@ async fn main() {
                                         };
                                         if socket_url == "Not Needed" {
                                             socket_url = config_socket.clone();
-                                        }
+                                        println!("contacting operator {:?}", operator_id);}
 
                                        // let url_encoded = encode(&presigned_url);
                                         let operator_endpoint = format!("{}/upload/{}", socket_url, upload_id);
@@ -859,7 +864,7 @@ async fn main() {
                                         .unwrap());
                                 }
                             }
-
+                            println!("done");
                             let body_json = serde_json::json!({
                                 "publish_results": publish_results
                             });
