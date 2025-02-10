@@ -29,6 +29,7 @@ use eigen_utils::{
 use futures_util::FutureExt;
 use futures_util::{StreamExt, TryStreamExt};
 use hex::FromHex;
+use hyper::header;
 use hyper::{
     service::{make_service_fn, service_fn},
     Body, Client, Request, Response, Server, StatusCode, Uri,
@@ -51,16 +52,16 @@ use alloy_provider::fillers::{
     BlobGasFiller, ChainIdFiller, FillProvider, GasFiller, JoinFill, NonceFiller, WalletFiller,
 };
 use futures_util::stream;
-use tokio_postgres::types::{FromSql, ToSql};
-use std::env;
 use serde_json::json;
+use std::env;
+use tokio_postgres::types::{FromSql, ToSql};
 
 use s3::error::S3Error;
 // use s3::signature::PresigningParams;
-use s3::{Bucket, Region};
 use s3::creds::Credentials;
-use uuid::Uuid;
+use s3::{Bucket, Region};
 use urlencoding::encode;
+use uuid::Uuid;
 
 const HEIGHT: usize = 63;
 const TASK_INDEX: u32 = 1;
@@ -367,6 +368,17 @@ async fn main() {
                                 }
                             }
                         }
+                        (hyper::Method::OPTIONS, ["get_preimage", _, _]) => {
+                            let response = Response::builder()
+                                .status(StatusCode::OK)
+                                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                                .header(header::ACCESS_CONTROL_ALLOW_HEADERS, "*")
+                                .header(header::ACCESS_CONTROL_ALLOW_METHODS, "POST, GET, OPTIONS")
+                                .body(Body::empty())
+                                .unwrap();
+
+                            return Ok::<_, Infallible>(response);
+                        }
                         (hyper::Method::GET, ["get_preimage", hash_type, hash]) => {
                             let ws_connect = alloy_provider::WsConnect::new(ws_endpoint);
                             let ws_provider = alloy_provider::ProviderBuilder::new()
@@ -424,6 +436,18 @@ async fn main() {
                                                 {
                                                     let response = Response::builder()
                                                         .status(StatusCode::OK)
+                                                        .header(
+                                                            header::ACCESS_CONTROL_ALLOW_ORIGIN,
+                                                            "*",
+                                                        )
+                                                        .header(
+                                                            header::ACCESS_CONTROL_ALLOW_HEADERS,
+                                                            "*",
+                                                        )
+                                                        .header(
+                                                            header::ACCESS_CONTROL_ALLOW_METHODS,
+                                                            "POST, GET, OPTIONS",
+                                                        )
                                                         .body(Body::from(preimage_response_bytes))
                                                         .unwrap();
 
@@ -627,22 +651,28 @@ async fn main() {
                             async fn generate_presigned_url(
                                 bucket: &Arc<Mutex<Box<Bucket>>>,
                                 key: &str,
-                                expires_in: Duration
+                                expires_in: Duration,
                             ) -> Result<String, S3Error> {
                                 let bucket = bucket.lock().await;
-                                let presigned_url = bucket.presign_put(key, expires_in.as_secs() as u32, None, None).await?;
+                                let presigned_url = bucket
+                                    .presign_put(key, expires_in.as_secs() as u32, None, None)
+                                    .await?;
                                 Ok(presigned_url)
                             }
 
-                            let upload_dir = env::var("UPLOAD_DIR").unwrap_or_else(|_| "./uploads".to_string());
+                            let upload_dir =
+                                env::var("UPLOAD_DIR").unwrap_or_else(|_| "./uploads".to_string());
                             println!("Files will be uploaded to: {}", upload_dir);
                             tokio::fs::create_dir_all(&upload_dir).await.unwrap();
 
                             // S3 environment variables
                             let bucket_name = env::var("BUCKET_NAME").expect("BUCKET_NAME not set");
-                            let aws_endpoint_url_s3 = env::var("AWS_ENDPOINT_URL_S3").expect("AWS_ENDPOINT_URL_S3 not set");
-                            let aws_access_key_id = env::var("AWS_ACCESS_KEY_ID").expect("AWS_ACCESS_KEY_ID not set");
-                            let aws_secret_access_key = env::var("AWS_SECRET_ACCESS_KEY").expect("AWS_SECRET_ACCESS_KEY not set");
+                            let aws_endpoint_url_s3 = env::var("AWS_ENDPOINT_URL_S3")
+                                .expect("AWS_ENDPOINT_URL_S3 not set");
+                            let aws_access_key_id =
+                                env::var("AWS_ACCESS_KEY_ID").expect("AWS_ACCESS_KEY_ID not set");
+                            let aws_secret_access_key = env::var("AWS_SECRET_ACCESS_KEY")
+                                .expect("AWS_SECRET_ACCESS_KEY not set");
 
                             // S3 client
                             let credentials = Credentials::new(
@@ -651,7 +681,8 @@ async fn main() {
                                 None,
                                 None,
                                 None,
-                            ).expect("Failed to create AWS credentials");
+                            )
+                            .expect("Failed to create AWS credentials");
 
                             let region = Region::Custom {
                                 region: "us-east-1".to_string(),
@@ -663,11 +694,17 @@ async fn main() {
                             let bucket = Arc::new(Mutex::new(bucket));
                             let upload_id = generate_upload_id();
                             let object_key = format!("uploads/{}", upload_id);
-                            match generate_presigned_url(&bucket, &object_key, Duration::from_secs(3600)).await {
+                            match generate_presigned_url(
+                                &bucket,
+                                &object_key,
+                                Duration::from_secs(3600),
+                            )
+                            .await
+                            {
                                 Ok(presigned_url) => {
                                     let response = UploadResponse {
                                         upload_id,
-                                        presigned_url
+                                        presigned_url,
                                     };
                                     let json_response = serde_json::to_string(&response).unwrap();
                                     Ok(Response::builder()
@@ -675,7 +712,7 @@ async fn main() {
                                         .header("Content-Type", "application/json")
                                         .body(Body::from(json_response))
                                         .unwrap())
-                                },
+                                }
                                 Err(err) => {
                                     let json_error = json!({
                                         "error": format!("Failed to generate presigned URL: {}", err)
@@ -691,9 +728,12 @@ async fn main() {
                         }
                         (hyper::Method::POST, ["publish", upload_id]) => {
                             let bucket_name = env::var("BUCKET_NAME").expect("BUCKET_NAME not set");
-                            let aws_endpoint_url_s3 = env::var("AWS_ENDPOINT_URL_S3").expect("AWS_ENDPOINT_URL_S3 not set");
-                            let aws_access_key_id = env::var("AWS_ACCESS_KEY_ID").expect("AWS_ACCESS_KEY_ID not set");
-                            let aws_secret_access_key = env::var("AWS_SECRET_ACCESS_KEY").expect("AWS_SECRET_ACCESS_KEY not set");
+                            let aws_endpoint_url_s3 = env::var("AWS_ENDPOINT_URL_S3")
+                                .expect("AWS_ENDPOINT_URL_S3 not set");
+                            let aws_access_key_id =
+                                env::var("AWS_ACCESS_KEY_ID").expect("AWS_ACCESS_KEY_ID not set");
+                            let aws_secret_access_key = env::var("AWS_SECRET_ACCESS_KEY")
+                                .expect("AWS_SECRET_ACCESS_KEY not set");
 
                             // S3 client
                             let credentials = Credentials::new(
@@ -702,7 +742,8 @@ async fn main() {
                                 None,
                                 None,
                                 None,
-                            ).expect("Failed to create AWS credentials");
+                            )
+                            .expect("Failed to create AWS credentials");
 
                             let region = Region::Custom {
                                 region: "us-east-1".to_string(),
@@ -743,7 +784,9 @@ async fn main() {
 
                             let new_key = format!("files/{}", upload_id);
                             println!("copying object..");
-                            if let Err(copy_err) = bucket.copy_object_internal(&old_key, &new_key).await {
+                            if let Err(copy_err) =
+                                bucket.copy_object_internal(&old_key, &new_key).await
+                            {
                                 let json_error = serde_json::json!({
                                     "error": format!("copy_object failed: {:?}", copy_err)
                                 });
@@ -767,23 +810,24 @@ async fn main() {
                                     .unwrap());
                             }
                             println!("getting presigned url..");
-                            let presigned_url: String = match bucket.presign_get(&new_key, 3600, None).await {
-                                Ok(url) => url,
-                                Err(err) => {
-                                    let json_error = serde_json::json!({
-                                        "error": format!("presign_get failed: {:?}", err)
-                                    });
-                                    let body = serde_json::to_string(&json_error).unwrap();
-                                    return Ok(Response::builder()
-                                        .status(StatusCode::INTERNAL_SERVER_ERROR)
-                                        .header("Content-Type", "application/json")
-                                        .body(Body::from(body))
-                                        .unwrap());
-                                }
-                            };
+                            let presigned_url: String =
+                                match bucket.presign_get(&new_key, 3600, None).await {
+                                    Ok(url) => url,
+                                    Err(err) => {
+                                        let json_error = serde_json::json!({
+                                            "error": format!("presign_get failed: {:?}", err)
+                                        });
+                                        let body = serde_json::to_string(&json_error).unwrap();
+                                        return Ok(Response::builder()
+                                            .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                            .header("Content-Type", "application/json")
+                                            .body(Body::from(body))
+                                            .unwrap());
+                                    }
+                                };
 
                             drop(bucket);
-                            
+
                             println!("finding operator set");
 
                             let ws_connect = alloy_provider::WsConnect::new(ws_endpoint.clone());
@@ -791,7 +835,8 @@ async fn main() {
                                 .on_ws(ws_connect)
                                 .await
                                 .unwrap();
-                            let current_block_number = ws_provider.clone().get_block_number().await.unwrap();
+                            let current_block_number =
+                                ws_provider.clone().get_block_number().await.unwrap();
                             let quorum_nums = [0];
 
                             let mut publish_results: Vec<serde_json::Value> = Vec::new();
@@ -799,7 +844,10 @@ async fn main() {
 
                             match avs_registry_service
                                 .clone()
-                                .get_operators_avs_state_at_block(current_block_number as u32, &quorum_nums)
+                                .get_operators_avs_state_at_block(
+                                    current_block_number as u32,
+                                    &quorum_nums,
+                                )
                                 .await
                             {
                                 Ok(operators) => {
@@ -815,10 +863,12 @@ async fn main() {
                                         };
                                         if socket_url == "Not Needed" {
                                             socket_url = config_socket.clone();
-                                        println!("contacting operator {:?}", operator_id);}
+                                            println!("contacting operator {:?}", operator_id);
+                                        }
 
-                                       // let url_encoded = encode(&presigned_url);
-                                        let operator_endpoint = format!("{}/upload/{}", socket_url, upload_id);
+                                        // let url_encoded = encode(&presigned_url);
+                                        let operator_endpoint =
+                                            format!("{}/upload/{}", socket_url, upload_id);
 
                                         let body_json = serde_json::json!({
                                             "presigned_url": presigned_url,
@@ -835,8 +885,11 @@ async fn main() {
                                         match http_client.request(req).await {
                                             Ok(resp) => {
                                                 let status = resp.status();
-                                                let body_bytes = hyper::body::to_bytes(resp).await.unwrap_or_default();
-                                                let body_str = String::from_utf8_lossy(&body_bytes).to_string();
+                                                let body_bytes = hyper::body::to_bytes(resp)
+                                                    .await
+                                                    .unwrap_or_default();
+                                                let body_str = String::from_utf8_lossy(&body_bytes)
+                                                    .to_string();
                                                 publish_results.push(json!({
                                                     "operator_id": hex::encode(operator_id.to_vec()),
                                                     "status_code": status.as_u16(),
@@ -882,12 +935,18 @@ async fn main() {
                                 .on_ws(ws_connect)
                                 .await
                                 .expect("Failed to connect to WS provider");
-                            let current_block_number = ws_provider.get_block_number().await
+                            let current_block_number = ws_provider
+                                .get_block_number()
+                                .await
                                 .expect("Failed to get current block number");
 
                             let quorum_nums = [0];
-                            let operators = avs_registry_service.clone()
-                                .get_operators_avs_state_at_block(current_block_number as u32, &quorum_nums)
+                            let operators = avs_registry_service
+                                .clone()
+                                .get_operators_avs_state_at_block(
+                                    current_block_number as u32,
+                                    &quorum_nums,
+                                )
                                 .await
                                 .expect("Failed to get operators");
 
@@ -900,12 +959,14 @@ async fn main() {
 
                                 let socket_url = {
                                     let map_guard = sockets_map.lock().await;
-                                    map_guard.get(&operator_id.to_vec())
+                                    map_guard
+                                        .get(&operator_id.to_vec())
                                         .cloned()
                                         .unwrap_or_else(|| "Not Needed".to_string())
                                 };
 
-                                let operator_endpoint = format!("{}/publish_status/{}", socket_url, upload_id);
+                                let operator_endpoint =
+                                    format!("{}/publish_status/{}", socket_url, upload_id);
 
                                 let request = Request::builder()
                                     .method("GET")
@@ -916,7 +977,8 @@ async fn main() {
                                 match http_client.request(request).await {
                                     Ok(resp) => {
                                         let status = resp.status();
-                                        let body_bytes = hyper::body::to_bytes(resp).await
+                                        let body_bytes = hyper::body::to_bytes(resp)
+                                            .await
                                             .expect("Failed to read response body");
                                         let body_str = String::from_utf8(body_bytes.to_vec())
                                             .expect("Response body is not valid UTF-8");
