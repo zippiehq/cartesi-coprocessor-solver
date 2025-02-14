@@ -1038,7 +1038,7 @@ async fn main() {
     println!("Finished OperatorSocketUpdate querying");
 
     if config.listen_network == "optimism" {
-        subscribe_task_issued_l2(
+        subscribe_task_issued(
             config.l2_ws_endpoint.clone(),
             config.l2_http_endpoint.clone(),
             config.payment_token.clone(),
@@ -1078,11 +1078,11 @@ async fn main() {
         .await;
     } else {
         //Subscriber which inserts new tasks into the DB
-        subscribe_task_issued_l1(
+        subscribe_task_issued(
             config.l1_ws_endpoint.clone(),
             config.l1_http_endpoint.clone(),
             config.payment_token.clone(),
-            config.task_issuer.clone(),
+            config.task_issuer.to_string(),
             pool.clone(),
             config.secret_key.clone(),
             config.payment_phrase.clone(),
@@ -1812,82 +1812,6 @@ fn new_task_issued_handler_l2(
     });
 }
 
-fn subscribe_task_issued_l1(
-    l1_ws_endpoint: String,
-    l1_http_endpoint: String,
-    payment_token: Address,
-    task_issuer: Address,
-    pool: Pool<PostgresConnectionManager<NoTls>>,
-    secret_key: String,
-    payment_phrase: String,
-) {
-    task::spawn({
-        async move {
-            println!("Started TaskIssued subscription");
-            let ws_connect = alloy_provider::WsConnect::new(l1_ws_endpoint);
-            let ws_provider = alloy_provider::ProviderBuilder::new()
-                .on_ws(ws_connect)
-                .await
-                .unwrap();
-            let event_filter = Filter::new()
-                .address(task_issuer)
-                .event("TaskIssued(bytes32,bytes,address)");
-            let event: Event<_, _, ICoprocessor::TaskIssued, _> =
-                Event::new(ws_provider.clone(), event_filter);
-
-            let subscription = event.subscribe().await.unwrap();
-            let mut stream = subscription.into_stream();
-            while let Ok((stream_event, _)) = stream.next().await.unwrap() {
-                println!("new TaskIssued {:?}", stream_event);
-                let generated_address = generate_eth_address(
-                    pool.clone(),
-                    stream_event.machineHash,
-                    payment_phrase.clone(),
-                )
-                .await;
-                let secret_key =
-                    SecretKey::from_slice(&hex::decode(secret_key.clone()).unwrap()).unwrap();
-                let signer = PrivateKeySigner::from(secret_key);
-                let wallet = EthereumWallet::from(signer);
-                let provider = ProviderBuilder::new()
-                    .with_recommended_fillers()
-                    .wallet(wallet)
-                    .on_http(l1_http_endpoint.parse().unwrap());
-                let contract = IERC20::new(payment_token, &provider);
-                let balance_caller = contract.balanceOf(generated_address);
-                match balance_caller.call().await {
-                    Ok(balance) => {
-                        println!("balanceOf {:?} = {:?}", generated_address, balance);
-                    }
-                    Err(err) => {
-                        println!("Transaction wasn't sent successfully: {err}");
-                    }
-                }
-                let client = pool.get().await.unwrap();
-                match client.execute(
-                    "INSERT INTO issued_tasks (machineHash, input, callback, status) VALUES ($1, $2, $3, $4::task_status) ",
-                    &[
-                        &stream_event.machineHash.0.to_vec(),
-                        &stream_event.input.to_vec(),
-                        &stream_event.callback.to_vec(),
-                        &task_status::waits_for_handling
-                    ],
-                ).await {
-                    Ok(_) => {
-                    client
-                    .batch_execute(
-                        "
-                        NOTIFY new_task_issued;",
-                    )
-                    .await.unwrap();
-                },
-                    Err(_) => {
-                    }
-                };
-            }
-        }
-    });
-}
 async fn send_message_to_l1(
     l1_http_endpoint: String,
     l1_coprocessor_address: Address,
@@ -1949,11 +1873,11 @@ async fn send_message_to_l1(
     Ok(*receipt.tx_hash())
 }
 
-fn subscribe_task_issued_l2(
-    l2_ws_endpoint: String,
-    l2_http_endpoint: String,
+fn subscribe_task_issued(
+    ws_endpoint: String,
+    http_endpoint: String,
     payment_token: Address,
-    l2_coprocessor_address: String,
+    task_issuer: String,
     pool: Pool<PostgresConnectionManager<NoTls>>,
     secret_key: String,
     payment_phrase: String,
@@ -1961,16 +1885,16 @@ fn subscribe_task_issued_l2(
     task::spawn({
         async move {
             let client = pool.get().await.unwrap();
-            println!("Started TaskIssued subscription on L2");
+            println!("Started TaskIssued subscription");
 
-            let ws_connect = alloy_provider::WsConnect::new(l2_ws_endpoint);
+            let ws_connect = alloy_provider::WsConnect::new(ws_endpoint);
             let ws_provider = alloy_provider::ProviderBuilder::new()
                 .on_ws(ws_connect)
                 .await
                 .unwrap();
 
-            let addr_parsed = Address::from_str(&l2_coprocessor_address)
-                .expect("Invalid L2 coprocessor address string");
+            let addr_parsed =
+                Address::from_str(&task_issuer).expect("Invalid task issuer address string");
 
             let event_filter = Filter::new()
                 .address(addr_parsed)
@@ -1985,7 +1909,7 @@ fn subscribe_task_issued_l2(
             while let Some(result) = stream.next().await {
                 match result {
                     Ok((stream_event, _)) => {
-                        println!("New TaskIssued event on L2: {:?}", stream_event);
+                        println!("New TaskIssued event: {:?}", stream_event);
 
                         let generated_address = generate_eth_address(
                             pool.clone(),
@@ -2002,7 +1926,7 @@ fn subscribe_task_issued_l2(
                         let provider = ProviderBuilder::new()
                             .with_recommended_fillers()
                             .wallet(wallet)
-                            .on_http(l2_http_endpoint.parse().unwrap());
+                            .on_http(http_endpoint.parse().unwrap());
 
                         let contract = IERC20::new(payment_token, &provider);
 
