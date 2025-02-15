@@ -1500,7 +1500,7 @@ fn new_task_issued_handler_l1(
                                 match call_builder.send().await {
                                     Ok(_pending_tx) => {}
                                     Err(err) => {
-                                        println!("Transaction wasn't sent successfully: {err}");
+                                        println!("Transaction {:?} wasn't sent successfully: {err}", hex::encode(call_builder.calldata()));
                                     }
                                 }
 
