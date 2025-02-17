@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+anyhow = "1.0"
 eigen-types = { git = "https://github.com/stskeeps/eigensdk-rs", rev = "e29f0eeef740c07371cb59043d3c2e971bc9cdb7"}
 eigen-services-blsaggregation = { git = "https://github.com/stskeeps/eigensdk-rs", rev = "e29f0eeef740c07371cb59043d3c2e971bc9cdb7"}
 eigen-services-avsregistry = { git = "https://github.com/stskeeps/eigensdk-rs", rev = "e29f0eeef740c07371cb59043d3c2e971bc9cdb7"}
