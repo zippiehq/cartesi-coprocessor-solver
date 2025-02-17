@@ -1013,6 +1013,28 @@ async fn main() {
                                 .unwrap())
                         }
 
+                        (hyper::Method::GET, ["operators"]) => {
+                            let sockets = sockets_map.lock().await;
+                            let operators: Vec<_> = sockets
+                                .iter()
+                                .map(|(pub_key, socket)| {
+                                    json!({
+                                        "public_key": hex::encode(pub_key),
+                                        "socket": socket,
+                                    })
+                                })
+                                .collect();
+
+                            let body = serde_json::to_string(&operators).unwrap();
+                            Ok::<_, Infallible>(
+                                Response::builder()
+                                    .status(StatusCode::OK)
+                                    .header("Content-Type", "application/json")
+                                    .body(Body::from(body))
+                                    .unwrap(),
+                            )
+                        }
+
                         (hyper::Method::GET, ["health"]) => {
                             let json_request = r#"{"healthy": "true"}"#;
                             let response = Response::new(Body::from(json_request));
