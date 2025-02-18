@@ -1,4 +1,3 @@
-use alloy::signers::k256::elliptic_curve::consts;
 use alloy::signers::k256::SecretKey;
 use alloy_contract::Event;
 use alloy_primitives::U256;
@@ -37,6 +36,7 @@ use hyper::{
     Body, Client, Request, Response, Server, StatusCode, Uri,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::error::Error;
 use std::io::Bytes;
 use std::str::FromStr;
@@ -63,7 +63,6 @@ use s3::error::S3Error;
 use anyhow;
 use s3::creds::Credentials;
 use s3::{Bucket, Region};
-use urlencoding::encode;
 use uuid::Uuid;
 
 const HEIGHT: usize = 63;
@@ -383,6 +382,21 @@ async fn main() {
                             return Ok::<_, Infallible>(response);
                         }
                         (hyper::Method::GET, ["get_preimage", hash_type, hash]) => {
+                            let hash_type = match hash_type.parse::<u8>() {
+                                Ok(t) => t,
+                                Err(_) => {
+                                    let json_error = serde_json::json!({
+                                        "error": "Invalid hash type. Must be a number between 0 and 255"
+                                    });
+                                    let json_error = serde_json::to_string(&json_error).unwrap();
+                                    let response = Response::builder()
+                                        .status(StatusCode::BAD_REQUEST)
+                                        .body(Body::from(json_error))
+                                        .unwrap();
+                                    return Ok::<_, Infallible>(response);
+                                }
+                            };
+
                             let ws_connect = alloy_provider::WsConnect::new(ws_endpoint);
                             let ws_provider = alloy_provider::ProviderBuilder::new()
                                 .on_ws(ws_connect)
@@ -434,6 +448,7 @@ async fn main() {
                                                 if check_preimage_hash(
                                                     &hex::decode(hash).unwrap(),
                                                     &preimage_response_bytes,
+                                                    hash_type,
                                                 )
                                                 .is_ok()
                                                 {
@@ -2282,16 +2297,37 @@ impl Into<NonSignerStakesAndSignatureSol> for NonSignerStakesAndSignature {
     }
 }
 
-fn check_preimage_hash(hash: &Vec<u8>, data: &Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
-    let mut hasher = Keccak256::new();
-    hasher.update(data);
-    let result = hasher.finalize();
-    if &result.to_vec() == hash {
+fn check_preimage_hash(
+    hash: &Vec<u8>,
+    data: &Vec<u8>,
+    hash_type: u8,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let result = match hash_type {
+        1 => {
+            let mut hasher = Sha256::new();
+            hasher.update(data);
+            hasher.finalize().to_vec()
+        }
+        2 => {
+            let mut hasher = Keccak256::new();
+            hasher.update(data);
+            hasher.finalize().to_vec()
+        }
+        _ => {
+            return Err(Box::<dyn std::error::Error>::from(
+                "Unsupported hash type. Only SHA-256 (1) and Keccak-256 (2) are supported",
+            ))
+        }
+    };
+
+    if &result == hash {
         return Ok(());
     } else {
-        return Err(Box::<dyn std::error::Error>::from(
-            "keccak256 of the data and the hash don't match",
-        ));
+        return Err(Box::<dyn std::error::Error>::from(match hash_type {
+            1 => "sha256 of the data and the hash don't match",
+            2 => "keccak256 of the data and the hash don't match",
+            _ => unreachable!(),
+        }));
     }
 }
 
