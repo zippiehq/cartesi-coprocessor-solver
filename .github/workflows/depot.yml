@@ -122,7 +122,7 @@ jobs:
           echo "Sanity check completed successfully."
 
     update-latest:
-      name: Update image
+      name: Update latest image
       runs-on: ubuntu-24.04
       needs: sanity
       if: ${{ github.ref == format('refs/heads/{0}', 'main') }}
@@ -142,7 +142,7 @@ jobs:
                 GITHUB_REPOSITORY: ${{ github.repository }}
 
     update-test:
-        name: Update image
+        name: Update testing image
         runs-on: ubuntu-24.04
         needs: sanity
         if: ${{ github.ref == format('refs/heads/{0}', 'testing') }}
