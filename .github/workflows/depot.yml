@@ -46,10 +46,12 @@ jobs:
                   username: ${{ github.actor }}
                   password: ${{ secrets.GITHUB_TOKEN }}
 
-            - name: Build and push
-              uses: docker/bake-action@v5
-              if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+            - uses: depot/setup-action@v1
+            - name: Build and push (depot)
+              uses: depot/bake-action@v1
               with:
+                  project: hs0gfs4l0l
+                  token: ${{ secrets.DEPOT_API_TOKEN }}
                   files: |
                       ./docker-bake.hcl
                       ./docker-bake.platforms.hcl
