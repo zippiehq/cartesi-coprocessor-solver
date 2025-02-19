@@ -10,6 +10,9 @@ on:
         branches:
             - "*"
 
+env:
+    REGISTRY: ghcr.io
+
 jobs:
     build:
         name: Build and Push Docker Image
