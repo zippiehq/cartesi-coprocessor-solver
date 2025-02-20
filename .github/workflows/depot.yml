@@ -9,6 +9,9 @@ on:
     pull_request:
         branches:
             - "*"
+permissions:
+    id-token: write
+    contents: read
 
 env:
     REGISTRY: ghcr.io
