@@ -91,6 +91,8 @@ struct Config {
     l2Sender: Address,
     senderData: Vec<u8>,
     eth_value: String,
+    enable_logging: bool,
+
 }
 #[derive(Debug, ToSql, FromSql, PartialEq)]
 enum task_status {
@@ -222,7 +224,8 @@ async fn main() {
     let ruleset = config.ruleset.clone();
     let max_ops = config.max_ops.clone();
     let addr: SocketAddr = ([0, 0, 0, 0], 3034).into();
-    let service = make_service_fn(|_| {
+    let service = make_service_fn(|conn: &hyper::server::conn::AddrStream| {
+        let remote_addr = conn.remote_addr();
         let avs_registry_service = avs_registry_service.clone();
         let ws_endpoint = config.l1_ws_endpoint.clone();
         let http_endpoint = config.l1_http_endpoint.clone();
@@ -236,6 +239,7 @@ async fn main() {
 
         async move {
             Ok::<_, Infallible>(service_fn(move |req| {
+                let remote_addr = remote_addr;
                 let avs_registry_service = avs_registry_service.clone();
                 let ws_endpoint = ws_endpoint.clone();
                 let http_endpoint = http_endpoint.clone();
@@ -250,6 +254,12 @@ async fn main() {
 
                 async move {
                     let path = req.uri().path().to_owned();
+                    let start = std::time::Instant::now();
+                    let method = req.method().clone();
+                    //let uri = req.uri().clone();
+                    let version = req.version();
+
+                    let response: Response<Body> = {
                     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
                     match (req.method().clone(), &segments as &[&str]) {
@@ -710,22 +720,22 @@ async fn main() {
                                         presigned_url,
                                     };
                                     let json_response = serde_json::to_string(&response).unwrap();
-                                    Ok(Response::builder()
+                                    Response::builder()
                                         .status(StatusCode::OK)
                                         .header("Content-Type", "application/json")
                                         .body(Body::from(json_response))
-                                        .unwrap())
+                                        .unwrap()
                                 }
                                 Err(err) => {
                                     let json_error = json!({
                                         "error": format!("Failed to generate presigned URL: {}", err)
                                     });
                                     let json_error = serde_json::to_string(&json_error).unwrap();
-                                    Ok(Response::builder()
+                                    Response::builder()
                                         .status(StatusCode::INTERNAL_SERVER_ERROR)
                                         .header("Content-Type", "application/json")
                                         .body(Body::from(json_error))
-                                        .unwrap())
+                                        .unwrap()
                                 }
                             }
                         }
@@ -925,11 +935,11 @@ async fn main() {
                                 "publish_results": publish_results
                             });
                             let body_str = serde_json::to_string(&body_json).unwrap();
-                            Ok(Response::builder()
+                            Response::builder()
                                 .status(StatusCode::OK)
                                 .header("Content-Type", "application/json")
                                 .body(Body::from(body_str))
-                                .unwrap())
+                                .unwrap()
                         }
 
                         (hyper::Method::GET, ["publish_status", upload_id]) => {
@@ -1006,11 +1016,11 @@ async fn main() {
                             });
                             let response_body = serde_json::to_string(&response_body).unwrap();
 
-                            Ok(Response::builder()
+                            Response::builder()
                                 .status(StatusCode::OK)
                                 .header("Content-Type", "application/json")
                                 .body(Body::from(response_body))
-                                .unwrap())
+                                .unwrap()
                         }
 
                         (hyper::Method::GET, ["health"]) => {
@@ -1023,14 +1033,44 @@ async fn main() {
                                 "error": "unknown request",
                             });
                             let json_error = serde_json::to_string(&json_error).unwrap();
-                            let response = Response::builder()
+                            Response::builder()
                                 .status(StatusCode::BAD_REQUEST)
                                 .body(Body::from(json_error))
-                                .unwrap();
-
-                            return Ok::<_, Infallible>(response);
+                                .unwrap()
                         }
                     }
+
+                };
+
+                let duration = start.elapsed();
+                if config.enable_logging {
+                    let now = chrono::Local::now().format("%d/%b/%Y:%H:%M:%S %z");
+                    let content_length = response
+                        .headers()
+                        .get(header::CONTENT_LENGTH)
+                        .and_then(|hv| hv.to_str().ok())
+                        .unwrap_or("-");
+                    println!(
+                        "{} - - [{}] \"{} {} HTTP/{}\" {} {} {}ms",
+                        remote_addr.ip(),
+                        now,
+                        method,
+                        path,
+                        match version {
+                            hyper::Version::HTTP_10 => "1.0",
+                            hyper::Version::HTTP_11 => "1.1",
+                            hyper::Version::HTTP_2  => "2",
+                            hyper::Version::HTTP_3  => "3",
+                            _ => "?"
+                        },
+                        response.status().as_u16(),
+                        content_length,
+                        duration.as_millis()
+                    );
+                }
+
+                Ok::<_, Infallible>(response)
+
                 }
             }))
         }
