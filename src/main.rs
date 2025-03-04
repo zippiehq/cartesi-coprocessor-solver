@@ -89,7 +89,7 @@ struct Config {
     listen_network: String,
     l2Sender: Address,
     senderData: Vec<u8>,
-    eth_value: String
+    eth_value: String,
 }
 #[derive(Debug, ToSql, FromSql, PartialEq)]
 enum task_status {
