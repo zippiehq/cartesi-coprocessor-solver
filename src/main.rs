@@ -1101,7 +1101,7 @@ async fn main() {
                             .get(header::CONTENT_LENGTH)
                             .and_then(|hv| hv.to_str().ok())
                             .unwrap_or("-");
-                        println!(
+                        eprintln!(
                             "{} - - [{}] \"{} {} HTTP/{}\" {} {} {}ms",
                             remote_addr.ip(),
                             now,
