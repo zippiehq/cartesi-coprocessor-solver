@@ -89,8 +89,7 @@ struct Config {
     listen_network: String,
     l2Sender: Address,
     senderData: Vec<u8>,
-    eth_value: String,
-    enable_logging: bool,
+    eth_value: String
 }
 #[derive(Debug, ToSql, FromSql, PartialEq)]
 enum task_status {
@@ -1095,7 +1094,7 @@ async fn main() {
                     };
 
                     let duration = start.elapsed();
-                    if config.enable_logging {
+                    {
                         let now = chrono::Local::now().format("%d/%b/%Y:%H:%M:%S %z");
                         let content_length = response
                             .headers()
