@@ -61,6 +61,7 @@ use tokio_postgres::types::{FromSql, ToSql};
 use s3::error::S3Error;
 // use s3::signature::PresigningParams;
 use anyhow;
+use ark_serialize::Write;
 use s3::creds::Credentials;
 use s3::{Bucket, Region};
 use uuid::Uuid;
@@ -99,8 +100,65 @@ enum task_status {
     sent_to_l1,
     finalized_on_l2,
 }
+
+fn setup_logging() {
+    env_logger::Builder::from_default_env()
+        .format(|buf, record| {
+            writeln!(
+                buf,
+                "{} {} [{}] {}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                record.level(),
+                record.target(),
+                record.args()
+            )
+        })
+        .init();
+
+    std::io::stdout().flush().unwrap_or_else(|e| {
+        eprintln!("Failed to flush stdout: {}", e);
+    });
+}
+
+async fn log_and_return(
+    response: Response<Body>,
+    remote_addr: SocketAddr,
+    method: hyper::Method,
+    path: String,
+    version: hyper::Version,
+    start: std::time::Instant,
+) -> Result<Response<Body>, Infallible> {
+    let content_length = response
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|hv| hv.to_str().ok())
+        .unwrap_or("-");
+
+    let log_message = format!(
+        "{} - - \"{}{}{}\" {} {}",
+        remote_addr.ip(),
+        method,
+        path,
+        match version {
+            hyper::Version::HTTP_10 => " HTTP/1.0",
+            hyper::Version::HTTP_11 => " HTTP/1.1",
+            hyper::Version::HTTP_2 => " HTTP/2.0",
+            hyper::Version::HTTP_3 => " HTTP/3.0",
+            _ => " HTTP/?.?",
+        },
+        response.status().as_u16(),
+        content_length
+    );
+
+    log::info!("{} ", log_message);
+
+    Ok(response)
+}
+
 #[tokio::main]
 async fn main() {
+    setup_logging();
+
     let config_string = std::fs::read_to_string("config.toml").unwrap();
     let config: Config = toml::from_str(&config_string).unwrap();
     let manager =
@@ -165,7 +223,7 @@ async fn main() {
         .await
         .unwrap();
 
-    println!("Starting solver..");
+    log::info!("Starting solver..");
 
     let arc_ws_endpoint = Arc::new(config.l1_ws_endpoint.clone());
 
@@ -195,7 +253,7 @@ async fn main() {
     let provider =
         alloy_provider::ProviderBuilder::new().on_http(config.l1_http_endpoint.parse().unwrap());
     let current_block_num = provider.get_block_number().await.unwrap();
-    println!("current_block_num {:?}", current_block_num);
+    log::info!("current_block_num {:?}", current_block_num);
 
     task::spawn({
         let arc_operators_info = operators_info_clone.clone();
@@ -253,8 +311,9 @@ async fn main() {
                     let path = req.uri().path().to_owned();
                     let start = std::time::Instant::now();
                     let method = req.method().clone();
-                    //let uri = req.uri().clone();
                     let version = req.version();
+
+                    log::info!(">>> RECEIVED REQUEST: {} {}", method, path);
 
                     let response: Response<Body> = {
                         let segments: Vec<&str> =
@@ -274,7 +333,16 @@ async fn main() {
                                             .status(StatusCode::BAD_REQUEST)
                                             .body(Body::from(json_error))
                                             .unwrap();
-                                        return Ok::<_, Infallible>(response);
+
+                                        return log_and_return(
+                                            response,
+                                            remote_addr,
+                                            method.clone(),
+                                            path.clone(),
+                                            version,
+                                            start,
+                                        )
+                                        .await;
                                     }
                                 };
 
@@ -288,7 +356,16 @@ async fn main() {
                                     .status(StatusCode::OK)
                                     .body(Body::from(json_response))
                                     .unwrap();
-                                return Ok::<_, Infallible>(response);
+
+                                return log_and_return(
+                                    response,
+                                    remote_addr,
+                                    method.clone(),
+                                    path.clone(),
+                                    version,
+                                    start,
+                                )
+                                .await;
                             }
                             (hyper::Method::POST, ["issue_task", machine_hash, callback]) => {
                                 let input = hyper::body::to_bytes(req.into_body())
@@ -350,10 +427,17 @@ async fn main() {
                                                     .body(Body::from(json_responses))
                                                     .unwrap();
 
-                                                return Ok::<_, Infallible>(response);
+                                                return log_and_return(
+                                                    response,
+                                                    remote_addr,
+                                                    method.clone(),
+                                                    path.clone(),
+                                                    version,
+                                                    start,
+                                                )
+                                                .await;
                                             }
                                             Err(err) => {
-                                                //handles the case when proofs weren't proved successfully
                                                 let json_error = serde_json::json!({
                                                     "error": err.to_string()
                                                 });
@@ -363,7 +447,16 @@ async fn main() {
                                                     .status(StatusCode::INTERNAL_SERVER_ERROR)
                                                     .body(Body::from(json_error))
                                                     .unwrap();
-                                                return Ok::<_, Infallible>(response);
+
+                                                return log_and_return(
+                                                    response,
+                                                    remote_addr,
+                                                    method.clone(),
+                                                    path.clone(),
+                                                    version,
+                                                    start,
+                                                )
+                                                .await;
                                             }
                                         }
                                     }
@@ -377,7 +470,16 @@ async fn main() {
                                             .status(StatusCode::INTERNAL_SERVER_ERROR)
                                             .body(Body::from(json_error))
                                             .unwrap();
-                                        return Ok::<_, Infallible>(response);
+
+                                        return log_and_return(
+                                            response,
+                                            remote_addr,
+                                            method.clone(),
+                                            path.clone(),
+                                            version,
+                                            start,
+                                        )
+                                        .await;
                                     }
                                 }
                             }
@@ -393,7 +495,15 @@ async fn main() {
                                     .body(Body::empty())
                                     .unwrap();
 
-                                return Ok::<_, Infallible>(response);
+                                return log_and_return(
+                                    response,
+                                    remote_addr,
+                                    method.clone(),
+                                    path.clone(),
+                                    version,
+                                    start,
+                                )
+                                .await;
                             }
                             (hyper::Method::GET, ["get_preimage", hash_type, hash]) => {
                                 let hash_type = match hash_type.parse::<u8>() {
@@ -408,7 +518,16 @@ async fn main() {
                                             .status(StatusCode::BAD_REQUEST)
                                             .body(Body::from(json_error))
                                             .unwrap();
-                                        return Ok::<_, Infallible>(response);
+
+                                        return log_and_return(
+                                            response,
+                                            remote_addr,
+                                            method.clone(),
+                                            path.clone(),
+                                            version,
+                                            start,
+                                        )
+                                        .await;
                                     }
                                 };
 
@@ -484,7 +603,15 @@ async fn main() {
                                                         .body(Body::from(preimage_response_bytes))
                                                         .unwrap();
 
-                                                        return Ok::<_, Infallible>(response);
+                                                        return log_and_return(
+                                                            response,
+                                                            remote_addr,
+                                                            method.clone(),
+                                                            path.clone(),
+                                                            version,
+                                                            start,
+                                                        )
+                                                        .await;
                                                     }
                                                 }
                                                 None => {
@@ -498,7 +625,15 @@ async fn main() {
                                                         .body(Body::from(json_error))
                                                         .unwrap();
 
-                                                    return Ok::<_, Infallible>(response);
+                                                    return log_and_return(
+                                                        response,
+                                                        remote_addr,
+                                                        method.clone(),
+                                                        path.clone(),
+                                                        version,
+                                                        start,
+                                                    )
+                                                    .await;
                                                 }
                                             }
                                         }
@@ -513,7 +648,16 @@ async fn main() {
                                             .status(StatusCode::INTERNAL_SERVER_ERROR)
                                             .body(Body::from(json_error))
                                             .unwrap();
-                                        return Ok::<_, Infallible>(response);
+
+                                        return log_and_return(
+                                            response,
+                                            remote_addr,
+                                            method.clone(),
+                                            path.clone(),
+                                            version,
+                                            start,
+                                        )
+                                        .await;
                                     }
                                 }
                                 let json_error = serde_json::json!({
@@ -526,7 +670,15 @@ async fn main() {
                                     .body(Body::from(json_error))
                                     .unwrap();
 
-                                return Ok::<_, Infallible>(response);
+                                return log_and_return(
+                                    response,
+                                    remote_addr,
+                                    method.clone(),
+                                    path.clone(),
+                                    version,
+                                    start,
+                                )
+                                .await;
                             }
                             (hyper::Method::POST, ["ensure", cid_str, machine_hash, size_str]) => {
                                 let generated_address = generate_eth_address(
@@ -549,13 +701,14 @@ async fn main() {
                                 let balance_caller = contract.balanceOf(generated_address);
                                 match balance_caller.call().await {
                                     Ok(balance) => {
-                                        println!(
+                                        log::info!(
                                             "balanceOf {:?} = {:?}",
-                                            generated_address, balance
+                                            generated_address,
+                                            balance
                                         );
                                     }
                                     Err(err) => {
-                                        println!("Transaction wasn't sent successfully: {err}");
+                                        log::error!("Transaction wasn't sent successfully: {err}");
                                     }
                                 }
                                 let ws_connect = alloy_provider::WsConnect::new(ws_endpoint);
@@ -596,30 +749,33 @@ async fn main() {
                                                         ))
                                                         .body(Body::empty())
                                                         .unwrap();
-                                                    println!(
+                                                    log::info!(
                                                         "{}/ensure/{}/{}/{}",
-                                                        socket, cid_str, machine_hash, size_str
+                                                        socket,
+                                                        cid_str,
+                                                        machine_hash,
+                                                        size_str
                                                     );
                                                     let client = Client::new();
                                                     let response =
                                                         client.request(request).await.unwrap();
                                                     let response_json =
-                                                    serde_json::from_slice::<serde_json::Value>(
-                                                        &hyper::body::to_bytes(response)
-                                                            .await
-                                                            .expect(
-                                                                format!(
-                                                                    "Error requesting {}/ensure/{}/{}/{}",
-                                                                    socket,
-                                                                    cid_str,
-                                                                    machine_hash,
-                                                                    size_str
+                                                        serde_json::from_slice::<serde_json::Value>(
+                                                            &hyper::body::to_bytes(response)
+                                                                .await
+                                                                .expect(
+                                                                    format!(
+                                                                        "Error requesting {}/ensure/{}/{}/{}",
+                                                                        socket,
+                                                                        cid_str,
+                                                                        machine_hash,
+                                                                        size_str
+                                                                    )
+                                                                    .as_str(),
                                                                 )
-                                                                .as_str(),
-                                                            )
-                                                            .to_vec(),
-                                                    )
-                                                    .unwrap();
+                                                                .to_vec(),
+                                                        )
+                                                        .unwrap();
                                                     match response_json.get("state") {
                                                         Some(serde_json::Value::String(state)) => {
                                                             states_for_operators.insert(
@@ -646,7 +802,15 @@ async fn main() {
                                                         .body(Body::from(json_error))
                                                         .unwrap();
 
-                                                    return Ok::<_, Infallible>(response);
+                                                    return log_and_return(
+                                                        response,
+                                                        remote_addr,
+                                                        method.clone(),
+                                                        path.clone(),
+                                                        version,
+                                                        start,
+                                                    )
+                                                    .await;
                                                 }
                                             }
                                         }
@@ -660,7 +824,15 @@ async fn main() {
                                             .body(Body::from(json_responses))
                                             .unwrap();
 
-                                        return Ok::<_, Infallible>(response);
+                                        return log_and_return(
+                                            response,
+                                            remote_addr,
+                                            method.clone(),
+                                            path.clone(),
+                                            version,
+                                            start,
+                                        )
+                                        .await;
                                     }
                                     Err(err) => {
                                         let json_error = serde_json::json!({
@@ -672,7 +844,16 @@ async fn main() {
                                             .status(StatusCode::INTERNAL_SERVER_ERROR)
                                             .body(Body::from(json_error))
                                             .unwrap();
-                                        return Ok::<_, Infallible>(response);
+
+                                        return log_and_return(
+                                            response,
+                                            remote_addr,
+                                            method.clone(),
+                                            path.clone(),
+                                            version,
+                                            start,
+                                        )
+                                        .await;
                                     }
                                 }
                             }
@@ -701,7 +882,7 @@ async fn main() {
 
                                 let upload_dir = env::var("UPLOAD_DIR")
                                     .unwrap_or_else(|_| "./uploads".to_string());
-                                println!("Files will be uploaded to: {}", upload_dir);
+                                log::info!("Files will be uploaded to: {}", upload_dir);
                                 tokio::fs::create_dir_all(&upload_dir).await.unwrap();
 
                                 // S3 environment variables
@@ -796,8 +977,7 @@ async fn main() {
                                 let bucket = Bucket::new(&bucket_name, region, credentials)
                                     .expect("Failed to create S3 bucket client");
                                 let old_key = format!("uploads/{}", upload_id);
-                                //let bucket_guard = bucket.lock().await;
-                                println!("checking upload exists..");
+                                log::info!("checking upload exists..");
                                 match bucket.head_object(&old_key).await {
                                     Ok((object_meta, _)) => {
                                         if object_meta.content_length.unwrap_or(0) < 1 {
@@ -805,11 +985,19 @@ async fn main() {
                                                 "error": "File is zero-length or not found"
                                             });
                                             let body = serde_json::to_string(&json_error).unwrap();
-                                            return Ok(Response::builder()
-                                                .status(StatusCode::BAD_REQUEST)
-                                                .header("Content-Type", "application/json")
-                                                .body(Body::from(body))
-                                                .unwrap());
+                                            return log_and_return(
+                                                Response::builder()
+                                                    .status(StatusCode::BAD_REQUEST)
+                                                    .header("Content-Type", "application/json")
+                                                    .body(Body::from(body))
+                                                    .unwrap(),
+                                                remote_addr,
+                                                method.clone(),
+                                                path.clone(),
+                                                version,
+                                                start,
+                                            )
+                                            .await;
                                         }
                                     }
                                     Err(e) => {
@@ -817,16 +1005,24 @@ async fn main() {
                                             "error": format!("head_object failed: {:?}", e)
                                         });
                                         let body = serde_json::to_string(&json_error).unwrap();
-                                        return Ok(Response::builder()
-                                            .status(StatusCode::NOT_FOUND)
-                                            .header("Content-Type", "application/json")
-                                            .body(Body::from(body))
-                                            .unwrap());
+                                        return log_and_return(
+                                            Response::builder()
+                                                .status(StatusCode::NOT_FOUND)
+                                                .header("Content-Type", "application/json")
+                                                .body(Body::from(body))
+                                                .unwrap(),
+                                            remote_addr,
+                                            method.clone(),
+                                            path.clone(),
+                                            version,
+                                            start,
+                                        )
+                                        .await;
                                     }
                                 }
 
                                 let new_key = format!("files/{}", upload_id);
-                                println!("copying object..");
+                                log::info!("copying object..");
                                 if let Err(copy_err) =
                                     bucket.copy_object_internal(&old_key, &new_key).await
                                 {
@@ -834,25 +1030,41 @@ async fn main() {
                                         "error": format!("copy_object failed: {:?}", copy_err)
                                     });
                                     let body = serde_json::to_string(&json_error).unwrap();
-                                    return Ok(Response::builder()
-                                        .status(StatusCode::INTERNAL_SERVER_ERROR)
-                                        .header("Content-Type", "application/json")
-                                        .body(Body::from(body))
-                                        .unwrap());
+                                    return log_and_return(
+                                        Response::builder()
+                                            .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                            .header("Content-Type", "application/json")
+                                            .body(Body::from(body))
+                                            .unwrap(),
+                                        remote_addr,
+                                        method.clone(),
+                                        path.clone(),
+                                        version,
+                                        start,
+                                    )
+                                    .await;
                                 }
-                                println!("deleting old object..");
+                                log::info!("deleting old object..");
                                 if let Err(del_err) = bucket.delete_object(&old_key).await {
                                     let json_error = serde_json::json!({
                                         "error": format!("delete_object failed: {:?}", del_err)
                                     });
                                     let body = serde_json::to_string(&json_error).unwrap();
-                                    return Ok(Response::builder()
-                                        .status(StatusCode::INTERNAL_SERVER_ERROR)
-                                        .header("Content-Type", "application/json")
-                                        .body(Body::from(body))
-                                        .unwrap());
+                                    return log_and_return(
+                                        Response::builder()
+                                            .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                            .header("Content-Type", "application/json")
+                                            .body(Body::from(body))
+                                            .unwrap(),
+                                        remote_addr,
+                                        method.clone(),
+                                        path.clone(),
+                                        version,
+                                        start,
+                                    )
+                                    .await;
                                 }
-                                println!("getting presigned url..");
+                                log::info!("getting presigned url..");
                                 let presigned_url: String =
                                     match bucket.presign_get(&new_key, 3600, None).await {
                                         Ok(url) => url,
@@ -861,17 +1073,24 @@ async fn main() {
                                                 "error": format!("presign_get failed: {:?}", err)
                                             });
                                             let body = serde_json::to_string(&json_error).unwrap();
-                                            return Ok(Response::builder()
-                                                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                                                .header("Content-Type", "application/json")
-                                                .body(Body::from(body))
-                                                .unwrap());
+                                            return log_and_return(
+                                                Response::builder()
+                                                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                                    .header("Content-Type", "application/json")
+                                                    .body(Body::from(body))
+                                                    .unwrap(),
+                                                remote_addr,
+                                                method.clone(),
+                                                path.clone(),
+                                                version,
+                                                start,
+                                            )
+                                            .await;
                                         }
                                     };
-
                                 drop(bucket);
 
-                                println!("finding operator set");
+                                log::info!("finding operator set");
 
                                 let ws_connect =
                                     alloy_provider::WsConnect::new(ws_endpoint.clone());
@@ -955,14 +1174,22 @@ async fn main() {
                                             "error": format!("Failed to get operators: {:?}", err)
                                         });
                                         let body = serde_json::to_string(&json_error).unwrap();
-                                        return Ok(Response::builder()
-                                            .status(StatusCode::INTERNAL_SERVER_ERROR)
-                                            .header("Content-Type", "application/json")
-                                            .body(Body::from(body))
-                                            .unwrap());
+                                        return log_and_return(
+                                            Response::builder()
+                                                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                                .header("Content-Type", "application/json")
+                                                .body(Body::from(body))
+                                                .unwrap(),
+                                            remote_addr,
+                                            method.clone(),
+                                            path.clone(),
+                                            version,
+                                            start,
+                                        )
+                                        .await;
                                     }
                                 }
-                                println!("done");
+                                log::info!("done");
                                 let body_json = serde_json::json!({
                                     "publish_results": publish_results
                                 });
@@ -1078,7 +1305,15 @@ async fn main() {
                             (hyper::Method::GET, ["health"]) => {
                                 let json_request = r#"{"healthy": "true"}"#;
                                 let response = Response::new(Body::from(json_request));
-                                return Ok::<_, Infallible>(response);
+                                return log_and_return(
+                                    response,
+                                    remote_addr,
+                                    method.clone(),
+                                    path.clone(),
+                                    version,
+                                    start,
+                                )
+                                .await;
                             }
                             _ => {
                                 let json_error = serde_json::json!({
@@ -1093,42 +1328,15 @@ async fn main() {
                         }
                     };
 
-                    let duration = start.elapsed();
-                    {
-                        let now = chrono::Local::now().format("%d/%b/%Y:%H:%M:%S %z");
-                        let content_length = response
-                            .headers()
-                            .get(header::CONTENT_LENGTH)
-                            .and_then(|hv| hv.to_str().ok())
-                            .unwrap_or("-");
-                        eprintln!(
-                            "{} - - [{}] \"{} {} HTTP/{}\" {} {} {}ms",
-                            remote_addr.ip(),
-                            now,
-                            method,
-                            path,
-                            match version {
-                                hyper::Version::HTTP_10 => "1.0",
-                                hyper::Version::HTTP_11 => "1.1",
-                                hyper::Version::HTTP_2 => "2",
-                                hyper::Version::HTTP_3 => "3",
-                                _ => "?",
-                            },
-                            response.status().as_u16(),
-                            content_length,
-                            duration.as_millis()
-                        );
-                    }
-
-                    Ok::<_, Infallible>(response)
+                    log_and_return(response, remote_addr, method, path, version, start).await
                 }
             }))
         }
     });
     let server = Server::bind(&addr).serve(Box::new(service));
-    println!("Server is listening on {}", addr);
+    log::info!("Server is listening on {}", addr);
     let _ = querying_thread.await;
-    println!("Finished OperatorSocketUpdate querying");
+    log::info!("Finished OperatorSocketUpdate querying");
 
     if config.listen_network == "optimism" {
         subscribe_task_issued(
@@ -1195,7 +1403,7 @@ async fn main() {
             pool.clone(),
             config.postgre_connect_request.clone(),
         );
-        println!("listening on l1");
+        log::info!("listening on l1");
     }
 
     subscribe_operator_socket_update(
@@ -1246,11 +1454,11 @@ fn query_operator_socket_update(
                 let filtered_events = event.query().await.unwrap();
 
                 for (operator_socket_update, log) in filtered_events {
-                    println!(
+                    log::info!(
                         "stream_event operator socket update {:?}",
                         operator_socket_update
                     );
-                    println!("stream_event operator socket update log {:?}", log);
+                    log::debug!("stream_event operator socket update log {:?}", log);
                     sockets_map.lock().await.insert(
                         operator_socket_update.operatorId.as_slice().to_vec(),
                         operator_socket_update.socket,
@@ -1306,7 +1514,7 @@ async fn handle_task_issued_operator(
                     .header("X-Max-Ops", max_ops)
                     .uri(format!("{}/classic/{:x}", socket, stream_event.machineHash))
                     .body(Body::from(stream_event.input.to_vec()))?;
-                println!("{}/classic/{:x}", socket, stream_event.machineHash);
+                log::info!("{}/classic/{:x}", socket, stream_event.machineHash);
                 let client = Client::new();
                 let response = client.request(request).await?;
                 let response_json = serde_json::from_slice::<serde_json::Value>(
@@ -1629,7 +1837,7 @@ fn new_task_issued_handler_l1(
                         }
                     }
                     Err(_) => {
-                        println!("waiting for new notifications");
+                        log::info!("waiting for new notifications");
                         let (notification_client, mut connection) =
                             tokio_postgres::connect(&postgres_connect_request, NoTls)
                                 .await
@@ -1831,7 +2039,7 @@ fn new_task_issued_handler_l2(
                                     .await
                                     .unwrap();
 
-                                println!(
+                                log::info!(
                                     "Calling send_message_to_l1 with:\n  l1_http_endpoint = {}\n  l1_coprocessor_address = {}\n  secret_key_str = {}\n  quorum_nums = {:?}\n  current_block_num = {}\n  l2Sender = {}\n  eth_value = {}\n",
                                     l1_http_endpoint,
                                     l1_coprocessor_address,
@@ -1873,7 +2081,7 @@ fn new_task_issued_handler_l2(
                                             .unwrap();
                                     }
                                     Err(err) => {
-                                        println!("Failed to send L1 transaction: {err}");
+                                        log::error!("Failed to send L1 transaction: {err}");
                                     }
                                 }
                                 client
@@ -1891,7 +2099,7 @@ fn new_task_issued_handler_l2(
                         }
                     }
                     Err(_) => {
-                        println!("Waiting for new L2 tasks...");
+                        log::info!("Waiting for new L2 tasks...");
                         let (notification_client, mut connection) =
                             tokio_postgres::connect(&postgres_connect_request, NoTls)
                                 .await
@@ -2001,7 +2209,7 @@ fn subscribe_task_issued(
     task::spawn({
         async move {
             let client = pool.get().await.unwrap();
-            println!("Started TaskIssued subscription");
+            log::info!("Started TaskIssued subscription");
 
             let ws_connect = alloy_provider::WsConnect::new(ws_endpoint);
             let ws_provider = alloy_provider::ProviderBuilder::new()
@@ -2025,7 +2233,7 @@ fn subscribe_task_issued(
             while let Some(result) = stream.next().await {
                 match result {
                     Ok((stream_event, _)) => {
-                        println!("New TaskIssued event: {:?}", stream_event);
+                        log::info!("New TaskIssued event: {:?}", stream_event);
 
                         let generated_address = generate_eth_address(
                             pool.clone(),
@@ -2049,10 +2257,10 @@ fn subscribe_task_issued(
                         let balance_caller = contract.balanceOf(generated_address);
                         match balance_caller.call().await {
                             Ok(balance) => {
-                                println!("Balance of {:?} = {:?}", generated_address, balance);
+                                log::info!("Balance of {:?} = {:?}", generated_address, balance);
                             }
                             Err(err) => {
-                                println!("Failed to fetch balance: {:?}", err);
+                                log::info!("Failed to fetch balance: {:?}", err);
                             }
                         }
 
@@ -2101,7 +2309,7 @@ async fn subscribe_task_completed_l2(
     pool: Pool<PostgresConnectionManager<NoTls>>,
 ) {
     tokio::spawn(async move {
-        println!("started TaskCompleted subscription on L2...");
+        log::info!("started TaskCompleted subscription on L2...");
 
         let ws_connect = alloy_provider::WsConnect::new(l2_ws_endpoint);
         let ws_provider = match alloy_provider::ProviderBuilder::new()
@@ -2185,7 +2393,7 @@ async fn subscribe_task_completed_l2(
                     {
                         eprintln!("error calling finalize_on_l2: {:?}", err);
                     } else {
-                        println!("successfully finalized on L2!");
+                        log::info!("successfully finalized on L2!");
                     }
                 }
                 Err(err) => {
@@ -2229,7 +2437,7 @@ async fn finalize_on_l2(
 
     match call_builder.send().await {
         Ok(pending_tx) => {
-            println!(
+            log::info!(
                 "L2 callbackWithOutputs transaction sent! TxHash: {:?}",
                 pending_tx.tx_hash()
             );
@@ -2252,7 +2460,7 @@ fn subscribe_operator_socket_update(
     current_last_block: Arc<Mutex<u64>>,
 ) {
     task::spawn({
-        println!("Started OperatorSocketUpdate subscription");
+        log::info!("Started OperatorSocketUpdate subscription");
 
         let ws_endpoint = Arc::clone(&arc_ws_endpoint);
         let sockets_map = Arc::clone(&sockets_map);
