@@ -1,8 +1,7 @@
 use alloy::signers::k256::SecretKey;
 use alloy_contract::Event;
-use alloy_primitives::U256;
 use alloy_primitives::{bytes, keccak256, Address, FixedBytes, Keccak256, TxHash, B256};
-use alloy_provider::{Identity, Provider, ProviderBuilder, ReqwestProvider};
+use alloy_provider::{Identity, Provider, ProviderBuilder};
 use alloy_rpc_types_eth::Filter;
 use alloy_signer_local::{MnemonicBuilder, PrivateKeySigner};
 use alloy_sol_types::sol;
@@ -10,35 +9,34 @@ use ark_serialize::CanonicalDeserialize;
 use bb8::Pool;
 use bb8_postgres::PostgresConnectionManager;
 use eigen_client_avsregistry::reader::AvsRegistryChainReader;
+use eigen_common::get_provider;
 use eigen_crypto_bls::{
     convert_to_bls_checker_g1_point, convert_to_bls_checker_g2_point, Signature,
 };
+use eigen_logging::get_test_logger;
 use eigen_logging::{log_level::LogLevel, tracing_logger::TracingLogger};
 use eigen_services_avsregistry::{chaincaller::AvsRegistryServiceChainCaller, AvsRegistryService};
-use eigen_services_blsaggregation::bls_agg::{
-    self, BlsAggregationServiceResponse, BlsAggregatorService,
-};
+use eigen_services_blsaggregation::bls_agg::TaskMetadata;
+use eigen_services_blsaggregation::bls_agg::{BlsAggregatorService, TaskSignature};
+use eigen_services_blsaggregation::bls_aggregation_service_response::BlsAggregationServiceResponse;
 use eigen_services_operatorsinfo::operatorsinfo_inmemory::OperatorInfoServiceInMemory;
-use eigen_types::operator::OperatorAvsState;
-use eigen_utils::{
-    get_provider,
-    iblssignaturechecker::{
-        IBLSSignatureChecker::{self, NonSignerStakesAndSignature},
-        BN254::G1Point,
-    },
+use eigen_types::avs_state::OperatorAvsState;
+use eigen_utils::slashing::middleware::iblssignaturechecker::{
+    IBLSSignatureChecker, IBLSSignatureCheckerTypes::NonSignerStakesAndSignature, BN254::G1Point,
 };
+use ethers::core::k256::ecdsa::signature;
 use futures_util::FutureExt;
 use futures_util::{StreamExt, TryStreamExt};
 use hex::FromHex;
 use hyper::header;
 use hyper::{
     service::{make_service_fn, service_fn},
-    Body, Client, Request, Response, Server, StatusCode, Uri,
+    Body, Client, Request, Response, Server, StatusCode,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::error::Error;
-use std::io::Bytes;
+use std::io::Write;
 use std::str::FromStr;
 use std::{collections::HashMap, convert::Infallible, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{
@@ -61,7 +59,6 @@ use tokio_postgres::types::{FromSql, ToSql};
 use s3::error::S3Error;
 // use s3::signature::PresigningParams;
 use anyhow;
-use ark_serialize::Write;
 use s3::creds::Credentials;
 use s3::{Bucket, Region};
 use uuid::Uuid;
@@ -242,7 +239,10 @@ async fn main() {
         avs_registry_reader.clone(),
         config.l1_ws_endpoint.clone(),
     )
-    .await;
+    .await
+    .unwrap()
+    .0;
+
     let avs_registry_service =
         AvsRegistryServiceChainCaller::new(avs_registry_reader, operators_info.clone());
 
@@ -264,7 +264,10 @@ async fn main() {
         }
     });
 
-    operators_info.past_querying_finished.notified().await;
+    operators_info
+        .wait_for_operator_registration_completion()
+        .await;
+
     let sockets_map: Arc<Mutex<HashMap<Vec<u8>, String>>> = Arc::new(Mutex::new(HashMap::new()));
     let current_last_block = Arc::new(Mutex::new(config.current_first_block));
     let querying_thread = query_operator_socket_update(
@@ -387,7 +390,7 @@ async fn main() {
                                 match avs_registry_service
                                     .clone()
                                     .get_operators_avs_state_at_block(
-                                        current_block_number as u32,
+                                        current_block_number,
                                         &quorum_nums,
                                     )
                                     .await
@@ -542,7 +545,7 @@ async fn main() {
                                 match avs_registry_service
                                     .clone()
                                     .get_operators_avs_state_at_block(
-                                        current_block_number as u32,
+                                        current_block_number,
                                         &quorum_nums,
                                     )
                                     .await
@@ -693,7 +696,6 @@ async fn main() {
                                 let signer = PrivateKeySigner::from(secret_key);
                                 let wallet = EthereumWallet::from(signer);
                                 let provider = ProviderBuilder::new()
-                                    .with_recommended_fillers()
                                     .wallet(wallet)
                                     .on_http(http_endpoint.parse().unwrap());
                                 let contract = IERC20::new(config.payment_token, &provider);
@@ -722,7 +724,7 @@ async fn main() {
                                 match avs_registry_service
                                     .clone()
                                     .get_operators_avs_state_at_block(
-                                        current_block_number as u32,
+                                        current_block_number,
                                         &quorum_nums,
                                     )
                                     .await
@@ -1107,7 +1109,7 @@ async fn main() {
                                 match avs_registry_service
                                     .clone()
                                     .get_operators_avs_state_at_block(
-                                        current_block_number as u32,
+                                        current_block_number,
                                         &quorum_nums,
                                     )
                                     .await
@@ -1215,7 +1217,7 @@ async fn main() {
                                 let operators = avs_registry_service
                                     .clone()
                                     .get_operators_avs_state_at_block(
-                                        current_block_number as u32,
+                                        current_block_number,
                                         &quorum_nums,
                                     )
                                     .await
@@ -1456,7 +1458,6 @@ async fn handle_bls_agg_response(
             let signer = PrivateKeySigner::from(secret_key);
             let wallet = EthereumWallet::from(signer);
             let provider = ProviderBuilder::new()
-                .with_recommended_fillers()
                 .wallet(wallet)
                 .on_http(l1_http_endpoint.parse().unwrap());
             let contract = ResponseCallbackContract::new(task_issuer, &provider);
@@ -1603,7 +1604,7 @@ fn monitor_issued_tasks(
                         match avs_registry_service
                         .clone()
                         .get_operators_avs_state_at_block(
-                            current_block_number as u32,
+                            current_block_number,
                             &quorum_nums,
                         )
                         .await
@@ -1778,7 +1779,7 @@ fn query_operator_socket_update(
                     .to_block(current_last_block.clone())
                     .event("OperatorSocketUpdate(bytes32,string)");
 
-                let event: Event<_, _, ISocketUpdater::OperatorSocketUpdate, _> =
+                let event: Event<(), _, ISocketUpdater::OperatorSocketUpdate, _> =
                     Event::new(ws_provider.clone(), event_filter);
                 let filtered_events = event.query().await.unwrap();
 
@@ -1825,10 +1826,12 @@ async fn handle_task_issued_operator(
     ),
     anyhow::Error,
 > {
-    let mut bls_agg_service = BlsAggregatorService::new(avs_registry_service.clone());
+    let bls_agg_service =
+        BlsAggregatorService::new(avs_registry_service.clone(), get_test_logger());
     let mut response_digest_map = HashMap::new();
+    let (handle, mut aggregator_response) = bls_agg_service.start();
+
     for operator in operators {
-        bls_agg_service = BlsAggregatorService::new(avs_registry_service.clone());
         let operator_id = operator.1.operator_id;
         let sockets_map = sockets_map.lock().await;
         match sockets_map.get(&operator_id.to_vec()) {
@@ -1920,24 +1923,22 @@ async fn handle_task_issued_operator(
 
                 let task_response_digest = keccak256(&task_response_buffer);
 
-                bls_agg_service
-                    .initialize_new_task(
-                        TASK_INDEX,
-                        current_block_num as u32,
-                        quorum_nums.clone(),
-                        quorum_threshold_percentages.clone(),
-                        time_to_expiry,
-                    )
-                    .await?;
+                let new_task = TaskMetadata::new(
+                    TASK_INDEX,
+                    current_block_num,
+                    quorum_nums.clone(),
+                    quorum_threshold_percentages.clone(),
+                    time_to_expiry,
+                );
+                handle.initialize_task(new_task).await?;
 
-                bls_agg_service
-                    .process_new_signature(
-                        TASK_INDEX,
-                        task_response_digest,
-                        Signature::new(g1),
-                        operator_id.into(),
-                    )
-                    .await?;
+                let signature = TaskSignature::new(
+                    TASK_INDEX,
+                    task_response_digest,
+                    Signature::new(g1),
+                    operator_id.into(),
+                );
+                handle.process_signature(signature).await?;
 
                 response_digest_map.insert(
                     B256::from_slice(task_response_digest.as_slice()),
@@ -1952,14 +1953,11 @@ async fn handle_task_issued_operator(
             }
         }
     }
-    let bls_agg_response = bls_agg_service
-        .aggregated_response_receiver
-        .lock()
+    let bls_agg_response = aggregator_response
+        .receive_aggregated_response()
         .await
-        .recv()
-        .await
-        .unwrap()
         .unwrap();
+
     println!(
         "agg_response_to_non_signer_stakes_and_signature {:?}",
         bls_agg_response
@@ -2038,7 +2036,7 @@ fn new_task_issued_handler_l1(
                         match avs_registry_service
                             .clone()
                             .get_operators_avs_state_at_block(
-                                current_block_number as u32,
+                                current_block_number,
                                 &quorum_nums,
                             )
                             .await
@@ -2162,7 +2160,7 @@ fn new_task_issued_handler_l2(
 
                         match avs_registry_service
                             .clone()
-                            .get_operators_avs_state_at_block(current_block_number as u32, &[0])
+                            .get_operators_avs_state_at_block(current_block_number, &[0])
                             .await
                         {
                             Ok(operators) => {
@@ -2192,7 +2190,6 @@ fn new_task_issued_handler_l2(
                                 let signer = PrivateKeySigner::from(secret_key);
                                 let wallet = EthereumWallet::from(signer);
                                 let provider = ProviderBuilder::new()
-                                    .with_recommended_fillers()
                                     .wallet(wallet)
                                     .on_http(l1_http_endpoint.parse().unwrap());
                                 let non_signer_stakes_and_signature_response =
@@ -2386,14 +2383,11 @@ async fn send_message_to_l1(
     let signer = PrivateKeySigner::from(decoded_secret_key);
     let wallet = EthereumWallet::from(signer);
 
-    let provider = ProviderBuilder::new()
-        .with_recommended_fillers()
-        .wallet(wallet)
-        .on_http(
-            l1_http_endpoint
-                .parse()
-                .map_err(|e| anyhow::anyhow!("Invalid endpoint: {}", e))?,
-        );
+    let provider = ProviderBuilder::new().wallet(wallet).on_http(
+        l1_http_endpoint
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid endpoint: {}", e))?,
+    );
 
     let l1_coprocessor = L1Coprocessor::new(l1_coprocessor_address, &provider);
 
@@ -2462,10 +2456,10 @@ fn subscribe_task_issued(
                 .address(addr_parsed)
                 .event("TaskIssued(bytes32,bytes,address)");
 
-            let event: Event<_, _, ICoprocessor::TaskIssued, _> =
+            let event: Event<(), _, ICoprocessor::TaskIssued, _> =
                 Event::new(ws_provider.clone(), event_filter);
 
-            let mut subscription = event.subscribe().await.unwrap();
+            let subscription = event.subscribe().await.unwrap();
             let mut stream = subscription.into_stream();
 
             while let Some(result) = stream.next().await {
@@ -2486,7 +2480,6 @@ fn subscribe_task_issued(
                         let signer = PrivateKeySigner::from(decoded_secret_key);
                         let wallet = EthereumWallet::from(signer);
                         let provider = ProviderBuilder::new()
-                            .with_recommended_fillers()
                             .wallet(wallet)
                             .on_http(http_endpoint.parse().unwrap());
 
@@ -2564,7 +2557,7 @@ async fn subscribe_task_completed_l2(
         let event_filter = Filter::new()
             .address(l2_coprocessor_address)
             .event("TaskCompleted(bytes32)");
-        let event: Event<_, _, IL2Coprocessor::TaskCompleted, _> =
+        let event: Event<(), _, IL2Coprocessor::TaskCompleted, _> =
             Event::new(ws_provider.clone(), event_filter);
 
         let subscription = match event.subscribe().await {
@@ -2656,7 +2649,6 @@ async fn finalize_on_l2(
     let signer = alloy_signer_local::PrivateKeySigner::from(secret_key);
     let wallet = alloy_network::EthereumWallet::from(signer);
     let provider = ProviderBuilder::new()
-        .with_recommended_fillers()
         .wallet(wallet)
         .on_http(l2_http_endpoint.parse().unwrap());
 
@@ -2714,7 +2706,7 @@ fn subscribe_operator_socket_update(
                 .event("OperatorSocketUpdate(bytes32,string)")
                 .from_block(*current_last_block.lock().await);
 
-            let event: Event<_, _, ISocketUpdater::OperatorSocketUpdate, _> =
+            let event: Event<(), _, ISocketUpdater::OperatorSocketUpdate, _> =
                 Event::new(ws_provider, event_filter);
 
             let subscription = event.subscribe().await.unwrap();

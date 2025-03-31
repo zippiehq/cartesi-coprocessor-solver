@@ -5,18 +5,19 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0"
-eigen-types = { git = "https://github.com/stskeeps/eigensdk-rs", rev = "e29f0eeef740c07371cb59043d3c2e971bc9cdb7"}
-eigen-services-blsaggregation = { git = "https://github.com/stskeeps/eigensdk-rs", rev = "e29f0eeef740c07371cb59043d3c2e971bc9cdb7"}
-eigen-services-avsregistry = { git = "https://github.com/stskeeps/eigensdk-rs", rev = "e29f0eeef740c07371cb59043d3c2e971bc9cdb7"}
-eigen-client-avsregistry = { git = "https://github.com/stskeeps/eigensdk-rs", rev = "e29f0eeef740c07371cb59043d3c2e971bc9cdb7"}
-eigen-crypto-bls = { git = "https://github.com/stskeeps/eigensdk-rs", rev = "e29f0eeef740c07371cb59043d3c2e971bc9cdb7"}
-eigen-logging = { git = "https://github.com/stskeeps/eigensdk-rs", rev = "e29f0eeef740c07371cb59043d3c2e971bc9cdb7"}
-eigen-utils = { git = "https://github.com/stskeeps/eigensdk-rs", rev = "e29f0eeef740c07371cb59043d3c2e971bc9cdb7"}
-eigen-services-operatorsinfo = { git = "https://github.com/stskeeps/eigensdk-rs", rev = "e29f0eeef740c07371cb59043d3c2e971bc9cdb7"}
-alloy-signer-local = { version = "0.5.3", features = ["mnemonic"]}
+eigen-types = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "f9d6cb687584fac0a547cfc5df5bbccc91c3769a" }
+eigen-services-blsaggregation = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "f9d6cb687584fac0a547cfc5df5bbccc91c3769a" }
+eigen-services-avsregistry = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "f9d6cb687584fac0a547cfc5df5bbccc91c3769a" }
+eigen-client-avsregistry = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "f9d6cb687584fac0a547cfc5df5bbccc91c3769a" }
+eigen-crypto-bls = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "f9d6cb687584fac0a547cfc5df5bbccc91c3769a" }
+eigen-logging = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "f9d6cb687584fac0a547cfc5df5bbccc91c3769a" }
+eigen-utils = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "f9d6cb687584fac0a547cfc5df5bbccc91c3769a" }
+eigen-services-operatorsinfo = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "f9d6cb687584fac0a547cfc5df5bbccc91c3769a" }
+eigen-common = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "f9d6cb687584fac0a547cfc5df5bbccc91c3769a" }
+alloy-signer-local = { version = "0.12.0", features = ["mnemonic"]}
 coins-bip39 = "0.12.0"
-alloy-network = "0.5.3"
-alloy = {version = "0.5.3", features = ["signers"]}
+alloy-network = "0.12.0"
+alloy = {version = "0.12.0", features = ["signers"]}
 log = "0.4.22"
 ethers = "2.0.14"
 sha3 = "0.10.8"
@@ -24,16 +25,16 @@ merkle = "1.11.0"
 hex = "0.4.3"
 ring = "0.17.8"
 tokio-util = "0.7.12"
-alloy-primitives = "0.8.8"
-alloy-provider = { version = "0.5.3", features = ["ws"]}
+alloy-primitives = "0.8.25"
+alloy-provider = { version = "0.12.0", features = ["ws"]}
 hyper = { version = "0.14", features = ["full"] }
-alloy-contract = { version = "0.5.3", features = ["pubsub"]}
-alloy-rpc-types-eth = "0.5.3"
+alloy-contract = { version = "0.12.0", features = ["pubsub"]}
+alloy-rpc-types-eth = "0.12.0"
 futures-util = "0.3"
-alloy-sol-types = "0.8.8"
+alloy-sol-types = "0.8.25"
 serde_json = "1.0.107"
-ark-bn254 = "0.4.0"
-ark-serialize = "0.4.2"
+ark-bn254 = "0.5.0"
+ark-serialize = "0.5.0"
 sha2 = "0.10.8"
 serde = { version = "1.0.203", features = ["derive"] }
 toml = "0.8.14"
