@@ -1865,25 +1865,28 @@ async fn handle_task_issued_operator(
                     }
                 };
 
-                let finish_callback: Vec<serde_json::Value> =
-                    match response_json.get("finish_callback") {
-                        Some(serde_json::Value::Array(finish_callback)) => {
-                            if finish_callback.len() == 2
-                                && finish_callback[0].is_number()
-                                && finish_callback[1].is_array()
-                            {
-                                finish_callback[1].as_array().unwrap().to_vec()
-                            } else {
-                                finish_callback.to_vec()
-                            }
+                let (finish_reason, finish_result) = match response_json.get("finish_callback") {
+                    Some(serde_json::Value::Array(finish_callback)) => {
+                        if finish_callback.len() == 2
+                            && finish_callback[0].is_number()
+                            && finish_callback[1].is_array()
+                        {
+                            let reason = finish_callback[0].as_u64().unwrap() as u16;
+                            let result = extract_number_array(
+                                finish_callback[1].as_array().unwrap().to_vec(),
+                            );
+                            (reason, result)
+                        } else {
+                            (0u16, extract_number_array(finish_callback.to_vec()))
                         }
-                        _ => {
-                            return Err(anyhow::anyhow!(
-                                "No finish_callback found in request response"
-                            ));
-                        }
-                    };
-                let finish_result = extract_number_array(finish_callback);
+                    }
+                    _ => {
+                        return Err(anyhow::anyhow!(
+                            "No finish_callback found in request response"
+                        ));
+                    }
+                };
+
                 let outputs_vector: Vec<(u16, Vec<u8>)> =
                     match response_json.get("outputs_callback_vector") {
                         Some(outputs_callback) => serde_json::from_value(outputs_callback.clone())?,
@@ -1915,7 +1918,10 @@ async fn handle_task_issued_operator(
                 let g1: ark_bn254::g1::G1Affine =
                     ark_bn254::g1::G1Affine::deserialize_uncompressed(&signature_bytes[..])?;
 
-                let mut task_response_buffer = vec![0u8; 12];
+                let finish_reason_bytes = finish_reason.to_be_bytes();
+                let mut task_response_buffer = vec![0u8; 30];
+                task_response_buffer.extend_from_slice(&finish_reason_bytes);
+                task_response_buffer.extend_from_slice(&[0u8; 12]);
                 task_response_buffer.extend_from_slice(&hex::decode(&ruleset)?);
                 task_response_buffer.extend_from_slice(&stream_event.machineHash.to_vec());
 
