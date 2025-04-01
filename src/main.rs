@@ -412,7 +412,7 @@ async fn main() {
                                             time_to_expiry,
                                             ruleset.clone(),
                                             max_ops,
-                                            current_block_num,
+                                            current_block_number,
                                             quorum_nums.to_vec(),
                                             quorum_threshold_percentages.clone(),
                                         )
@@ -1938,7 +1938,9 @@ async fn handle_task_issued_operator(
                     Signature::new(g1),
                     operator_id.into(),
                 );
-                handle.process_signature(signature).await?;
+
+                // XXX fix this for multiple operators
+                let processed_sig = handle.process_signature(signature).await.unwrap();
 
                 response_digest_map.insert(
                     B256::from_slice(task_response_digest.as_slice()),
@@ -2052,13 +2054,13 @@ fn new_task_issued_handler_l1(
                                     time_to_expiry,
                                     ruleset.clone(),
                                     max_ops,
-                                    current_block_num,
+                                    current_block_number,
                                     quorum_nums.to_vec(),
                                     quorum_threshold_percentages.clone(),
                                 )
                                 .await;
 
-                                handle_bls_agg_response(bls_agg_response, secret_key.clone(), l1_http_endpoint.clone(), task_issuer, quorum_nums, current_block_num, ruleset.clone(), task_issued, &pool, id).await;
+                                handle_bls_agg_response(bls_agg_response, secret_key.clone(), l1_http_endpoint.clone(), task_issuer, quorum_nums, current_block_number, ruleset.clone(), task_issued, &pool, id).await;
                             }
                             Err(e) => println!(
                                 "no operators found at block {:?}. Error {:?}",
