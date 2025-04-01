@@ -1508,6 +1508,7 @@ async fn handle_bls_agg_response(
                             )
                             .unwrap()
                             .0,
+                            errorCode: 0u32,
                         },
                         quorum_nums.into(),
                         100,
@@ -1678,6 +1679,7 @@ fn monitor_issued_tasks(
                     machineHash: machine_hash_fixed,
                     payloadHash: payload_hash_fixed,
                     outputMerkle: output_merkle_fixed,
+                    errorCode: 0u32,
                 };
 
                 if let Err(err) = finalize_on_l2(
@@ -2248,6 +2250,7 @@ fn new_task_issued_handler_l2(
                                     machineHash: task_issued.machineHash,
                                     payloadHash: keccak256(&task_issued.input),
                                     outputMerkle: output_merkle_fixed,
+                                    errorCode: 0u32,
                                 };
 
                                 let callback_address_bytes = task_issued.callback.0.to_vec();
@@ -2622,6 +2625,7 @@ async fn subscribe_task_completed_l2(
                         machineHash: machine_hash_fixed,
                         payloadHash: payload_hash_fixed,
                         outputMerkle: output_merkle_fixed,
+                        errorCode: 0u32,
                     };
 
                     if let Err(err) = finalize_on_l2(
@@ -2904,6 +2908,7 @@ sol! {
         bytes32 machineHash;
         bytes32 payloadHash;
         bytes32 outputMerkle;
+        uint32 errorCode;
     }
     #[derive(Debug)]
         struct G1PointSol {
