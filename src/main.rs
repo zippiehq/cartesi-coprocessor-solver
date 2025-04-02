@@ -220,7 +220,7 @@ async fn main() {
         .await
         .unwrap();
 
-        client
+    client
         .batch_execute(
             "
         ALTER TABLE finalization_data ADD COLUMN IF NOT EXISTS error_code INTEGER NOT NULL DEFAULT 0;
@@ -1901,13 +1901,12 @@ async fn handle_task_issued_operator(
                     0
                 };
 
-                let finish_callback_data: Vec<serde_json::Value> = if finish_callback.len() == 2
-                    && finish_callback[1].is_array()
-                {
-                    finish_callback[1].as_array().unwrap().to_vec()
-                } else {
-                    finish_callback.to_vec()
-                };
+                let finish_callback_data: Vec<serde_json::Value> =
+                    if finish_callback.len() == 2 && finish_callback[1].is_array() {
+                        finish_callback[1].as_array().unwrap().to_vec()
+                    } else {
+                        finish_callback.to_vec()
+                    };
 
                 let finish_result = extract_number_array(finish_callback_data);
                 let outputs_vector: Vec<(u16, Vec<u8>)> =
