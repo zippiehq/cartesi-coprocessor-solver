@@ -1939,13 +1939,18 @@ async fn handle_task_issued_operator(
                     operator_id.into(),
                 );
                 let operators_avs_state = avs_registry_service
-                .get_operators_avs_state_at_block(current_block_num, &quorum_nums)
-                .await.unwrap();
+                    .get_operators_avs_state_at_block(current_block_num, &quorum_nums)
+                    .await
+                    .unwrap();
                 println!("operators_avs_state {:?}", operators_avs_state);
-                 let quorums_avs_state = avs_registry_service
+                let quorums_avs_state = avs_registry_service
                     .get_quorums_avs_state_at_block(&quorum_nums, current_block_num)
-                    .await.unwrap();
-                println!("quorums_avs_state {:?} current_block_num {:?}", quorums_avs_state, current_block_num);
+                    .await
+                    .unwrap();
+                println!(
+                    "quorums_avs_state {:?} current_block_num {:?}",
+                    quorums_avs_state, current_block_num
+                );
                 // XXX fix this for multiple operators
                 let processed_sig = handle.process_signature(signature).await.unwrap();
 
@@ -1967,10 +1972,7 @@ async fn handle_task_issued_operator(
         .await
         .unwrap();
 
-    println!(
-        "bls_agg_response {:?}",
-        bls_agg_response
-    );
+    println!("bls_agg_response {:?}", bls_agg_response);
     Ok((bls_agg_response, response_digest_map))
 }
 fn extract_number_array(values: Vec<serde_json::Value>) -> Vec<u8> {
