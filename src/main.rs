@@ -1444,7 +1444,7 @@ async fn main() {
 }
 
 async fn handle_bls_agg_response(
-    bls_agg_response: Result<
+    result: Result<
         (
             BlsAggregationServiceResponse,
             HashMap<FixedBytes<32>, Vec<(u16, Vec<u8>)>>,
@@ -1462,8 +1462,8 @@ async fn handle_bls_agg_response(
     pool: &Pool<PostgresConnectionManager<NoTls>>,
     id: i32,
 ) {
-    match bls_agg_response {
-        Ok((bls_agg_response, outputs_map, error_code)) => {
+    match result {
+        Ok((service_response, outputs_map, error_code)) => {
             let secret_key =
                 SecretKey::from_slice(&hex::decode(secret_key.clone()).unwrap()).unwrap();
             let signer = PrivateKeySigner::from(secret_key);
@@ -1473,9 +1473,9 @@ async fn handle_bls_agg_response(
                 .on_http(l1_http_endpoint.parse().unwrap());
             let contract = ResponseCallbackContract::new(task_issuer, &provider);
             let non_signer_stakes_and_signature_response =
-                agg_response_to_non_signer_stakes_and_signature(bls_agg_response.clone());
+                agg_response_to_non_signer_stakes_and_signature(service_response.clone());
             let outputs: Vec<alloy_primitives::Bytes> = outputs_map
-                .get(&bls_agg_response.task_response_digest)
+                .get(&service_response.task_response_digest)
                 .unwrap()
                 .iter()
                 .map(|bytes| bytes.clone().1.into())
@@ -1484,7 +1484,7 @@ async fn handle_bls_agg_response(
             let service_manager = IBLSSignatureChecker::new(task_issuer, root_provider);
             let check_signatures_result = service_manager
                 .checkSignatures(
-                    bls_agg_response.task_response_digest,
+                    service_response.task_response_digest,
                     alloy_primitives::Bytes::from(quorum_nums),
                     current_block_num as u32,
                     non_signer_stakes_and_signature_response.clone(),
