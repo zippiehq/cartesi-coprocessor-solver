@@ -1620,7 +1620,7 @@ fn monitor_issued_tasks(
                                 time_to_expiry,
                                 ruleset.clone(),
                                 max_ops,
-                                current_block_num,
+                                current_block_number,
                                 quorum_nums.to_vec(),
                                 quorum_threshold_percentages.clone(),
                             )
@@ -1938,7 +1938,14 @@ async fn handle_task_issued_operator(
                     Signature::new(g1),
                     operator_id.into(),
                 );
-
+                let operators_avs_state = avs_registry_service
+                .get_operators_avs_state_at_block(current_block_num, &quorum_nums)
+                .await.unwrap();
+                println!("operators_avs_state {:?}", operators_avs_state);
+                 let quorums_avs_state = avs_registry_service
+                    .get_quorums_avs_state_at_block(&quorum_nums, current_block_num)
+                    .await.unwrap();
+                println!("quorums_avs_state {:?} current_block_num {:?}", quorums_avs_state, current_block_num);
                 // XXX fix this for multiple operators
                 let processed_sig = handle.process_signature(signature).await.unwrap();
 
@@ -1961,7 +1968,7 @@ async fn handle_task_issued_operator(
         .unwrap();
 
     println!(
-        "agg_response_to_non_signer_stakes_and_signature {:?}",
+        "bls_agg_response {:?}",
         bls_agg_response
     );
     Ok((bls_agg_response, response_digest_map))
@@ -2044,6 +2051,7 @@ fn new_task_issued_handler_l1(
                             .await
                         {
                             Ok(operators) => {
+                                println!("operators {:?}", operators);
                                 let bls_agg_response = handle_task_issued_operator(
                                     operators,
                                     false,
@@ -2176,7 +2184,7 @@ fn new_task_issued_handler_l2(
                                     Duration::from_secs(10),
                                     ruleset.clone(),
                                     max_ops,
-                                    current_block_num,
+                                    current_block_number,
                                     quorum_nums.to_vec(),
                                     quorum_threshold_percentages.clone(),
                                 )
