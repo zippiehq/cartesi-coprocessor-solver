@@ -2003,7 +2003,7 @@ async fn handle_task_issued_operator(
         .unwrap();
 
     println!("bls_agg_response {:?}", bls_agg_response);
-    Ok((bls_agg_response, response_digest_map))
+    Ok((bls_agg_response, response_digest_map, error_code))
 }
 fn extract_number_array(values: Vec<serde_json::Value>) -> Vec<u8> {
     let mut byte_vec = Vec::new();
