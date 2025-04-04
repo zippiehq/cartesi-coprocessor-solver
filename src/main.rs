@@ -214,8 +214,18 @@ async fn main() {
             resp_payloadHash BYTEA,
             resp_outputMerkle BYTEA,
             callback_address BYTEA,
-            outputs BYTEA[]
+            outputs BYTEA[],
+            error_code INTEGER NOT NULL DEFAULT 0
         )
+    ",
+        )
+        .await
+        .unwrap();
+
+    client
+        .batch_execute(
+            "
+        ALTER TABLE finalization_data ADD COLUMN IF NOT EXISTS error_code INTEGER NOT NULL DEFAULT 0;
     ",
         )
         .await
@@ -420,7 +430,7 @@ async fn main() {
                                         )
                                         .await;
                                         match bls_agg_response {
-                                            Ok(service_response) => {
+                                            Ok((service_response, outputs_map, error_code)) => {
                                                 let json_responses = serde_json::json!({
                                                     "service_response": service_response,
                                                 });
@@ -1436,10 +1446,11 @@ async fn main() {
 }
 
 async fn handle_bls_agg_response(
-    bls_agg_response: Result<
+    result: Result<
         (
             BlsAggregationServiceResponse,
             HashMap<FixedBytes<32>, Vec<(u16, Vec<u8>)>>,
+            u8,
         ),
         anyhow::Error,
     >,
@@ -1453,8 +1464,8 @@ async fn handle_bls_agg_response(
     pool: &Pool<PostgresConnectionManager<NoTls>>,
     id: i32,
 ) {
-    match bls_agg_response {
-        Ok(bls_agg_response) => {
+    match result {
+        Ok((service_response, outputs_map, error_code)) => {
             let secret_key =
                 SecretKey::from_slice(&hex::decode(secret_key.clone()).unwrap()).unwrap();
             let signer = PrivateKeySigner::from(secret_key);
@@ -1464,10 +1475,9 @@ async fn handle_bls_agg_response(
                 .on_http(l1_http_endpoint.parse().unwrap());
             let contract = ResponseCallbackContract::new(task_issuer, &provider);
             let non_signer_stakes_and_signature_response =
-                agg_response_to_non_signer_stakes_and_signature(bls_agg_response.0.clone());
-            let outputs: Vec<alloy_primitives::Bytes> = bls_agg_response
-                .1
-                .get(&bls_agg_response.0.task_response_digest)
+                agg_response_to_non_signer_stakes_and_signature(service_response.clone());
+            let outputs: Vec<alloy_primitives::Bytes> = outputs_map
+                .get(&service_response.task_response_digest)
                 .unwrap()
                 .iter()
                 .map(|bytes| bytes.clone().1.into())
@@ -1476,7 +1486,7 @@ async fn handle_bls_agg_response(
             let service_manager = IBLSSignatureChecker::new(task_issuer, root_provider);
             let check_signatures_result = service_manager
                 .checkSignatures(
-                    bls_agg_response.0.task_response_digest,
+                    service_response.task_response_digest,
                     alloy_primitives::Bytes::from(quorum_nums),
                     current_block_num as u32,
                     non_signer_stakes_and_signature_response.clone(),
@@ -1511,6 +1521,7 @@ async fn handle_bls_agg_response(
                             )
                             .unwrap()
                             .0,
+                            errorCode: error_code,
                         },
                         quorum_nums.into(),
                         100,
@@ -1656,7 +1667,7 @@ fn monitor_issued_tasks(
                 let input: Vec<u8> = row.get(2);
 
                 let row = match client.query_one(
-                    "SELECT resp_ruleSet, resp_outputMerkle, callback_address, outputs
+                    "SELECT resp_ruleSet, resp_outputMerkle, callback_address, outputs, error_code
                      FROM finalization_data WHERE resp_machineHash = $1 AND resp_payloadHash = $2",
                     &[&machine_hash, &input],
                 ).await {
@@ -1671,6 +1682,7 @@ fn monitor_issued_tasks(
                 let resp_output_merkle: Vec<u8> = row.get(1);
                 let callback_address_bytes: Vec<u8> = row.get(2);
                 let outputs_db: Vec<Vec<u8>> = row.get(3);
+                let error_code: i32 = row.get(4);
 
                 let rule_set_addr = Address::from_slice(&resp_rule_set);
                 let machine_hash_fixed = B256::from_slice(&machine_hash);
@@ -1683,6 +1695,7 @@ fn monitor_issued_tasks(
                     machineHash: machine_hash_fixed,
                     payloadHash: payload_hash_fixed,
                     outputMerkle: output_merkle_fixed,
+                    errorCode: error_code as u8,
                 };
 
                 if let Err(err) = finalize_on_l2(
@@ -1828,6 +1841,7 @@ async fn handle_task_issued_operator(
     (
         BlsAggregationServiceResponse,
         HashMap<alloy_primitives::FixedBytes<32>, Vec<(u16, Vec<u8>)>>,
+        u8,
     ),
     anyhow::Error,
 > {
@@ -1835,6 +1849,8 @@ async fn handle_task_issued_operator(
         BlsAggregatorService::new(avs_registry_service.clone(), get_test_logger());
     let mut response_digest_map = HashMap::new();
     let (handle, mut aggregator_response) = bls_agg_service.start();
+
+    let mut error_code: u8 = 0;
 
     for operator in operators {
         let operator_id = operator.1.operator_id;
@@ -1883,7 +1899,21 @@ async fn handle_task_issued_operator(
                             ));
                         }
                     };
-                let finish_result = extract_number_array(finish_callback);
+
+                error_code = if finish_callback.len() == 2 && finish_callback[0].is_number() {
+                    finish_callback[0].as_u64().unwrap_or(0) as u8
+                } else {
+                    0
+                };
+
+                let finish_callback_data: Vec<serde_json::Value> =
+                    if finish_callback.len() == 2 && finish_callback[1].is_array() {
+                        finish_callback[1].as_array().unwrap().to_vec()
+                    } else {
+                        finish_callback.to_vec()
+                    };
+
+                let finish_result = extract_number_array(finish_callback_data);
                 let outputs_vector: Vec<(u16, Vec<u8>)> =
                     match response_json.get("outputs_callback_vector") {
                         Some(outputs_callback) => serde_json::from_value(outputs_callback.clone())?,
@@ -1978,7 +2008,7 @@ async fn handle_task_issued_operator(
         .unwrap();
 
     println!("bls_agg_response {:?}", bls_agg_response);
-    Ok((bls_agg_response, response_digest_map))
+    Ok((bls_agg_response, response_digest_map, error_code))
 }
 fn extract_number_array(values: Vec<serde_json::Value>) -> Vec<u8> {
     let mut byte_vec = Vec::new();
@@ -2253,6 +2283,7 @@ fn new_task_issued_handler_l2(
                                     machineHash: task_issued.machineHash,
                                     payloadHash: keccak256(&task_issued.input),
                                     outputMerkle: output_merkle_fixed,
+                                    errorCode: bls_agg_response.2,
                                 };
 
                                 let callback_address_bytes = task_issued.callback.0.to_vec();
@@ -2269,8 +2300,9 @@ fn new_task_issued_handler_l2(
                                                     resp_payloadHash,
                                                     resp_outputMerkle,
                                                     callback_address,
-                                                    outputs
-                                                ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                                                    outputs,
+                                                    error_code
+                                                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                                                 ON CONFLICT (resp_responseHash) DO NOTHING",
                                         &[
                                             &resp_response_hash,
@@ -2280,6 +2312,7 @@ fn new_task_issued_handler_l2(
                                             &resp_output_merkle,
                                             &callback_address_bytes,
                                             &outputs_db,
+                                            &(bls_agg_response.2 as i32),
                                         ],
                                     )
                                     .await
@@ -2598,7 +2631,7 @@ async fn subscribe_task_completed_l2(
                     let client = pool.get().await.unwrap();
 
                     let row = match client.query_one(
-                        "SELECT resp_ruleSet, resp_machineHash, resp_payloadHash, resp_outputMerkle, callback_address, outputs
+                        "SELECT resp_ruleSet, resp_machineHash, resp_payloadHash, resp_outputMerkle, callback_address, outputs, error_code
                          FROM finalization_data WHERE resp_responseHash = $1",
                         &[&task_completed_event.responseHash.0.to_vec()],
                     ).await {
@@ -2615,6 +2648,7 @@ async fn subscribe_task_completed_l2(
                     let resp_output_merkle: Vec<u8> = row.get(3);
                     let callback_address_bytes: Vec<u8> = row.get(4);
                     let outputs_db: Vec<Vec<u8>> = row.get(5);
+                    let error_code: i32 = row.get(6);
 
                     let rule_set_addr = Address::from_slice(&resp_rule_set);
                     let machine_hash_fixed = B256::from_slice(&resp_machine_hash);
@@ -2627,6 +2661,7 @@ async fn subscribe_task_completed_l2(
                         machineHash: machine_hash_fixed,
                         payloadHash: payload_hash_fixed,
                         outputMerkle: output_merkle_fixed,
+                        errorCode: error_code as u8,
                     };
 
                     if let Err(err) = finalize_on_l2(
@@ -2909,6 +2944,7 @@ sol! {
         bytes32 machineHash;
         bytes32 payloadHash;
         bytes32 outputMerkle;
+        uint8 errorCode;
     }
     #[derive(Debug)]
         struct G1PointSol {
