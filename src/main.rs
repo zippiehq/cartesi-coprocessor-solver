@@ -2,9 +2,9 @@ use alloy::signers::k256::SecretKey;
 use alloy_contract::Event;
 use alloy_primitives::{bytes, keccak256, Address, FixedBytes, Keccak256, TxHash, B256};
 use alloy_provider::{Identity, Provider, ProviderBuilder};
-use alloy_rpc_types_eth::Filter;
-use alloy_rpc_types_eth::BlockNumberOrTag;
 use alloy_rpc_types_eth::BlockId;
+use alloy_rpc_types_eth::BlockNumberOrTag;
+use alloy_rpc_types_eth::Filter;
 use alloy_signer_local::{MnemonicBuilder, PrivateKeySigner};
 use alloy_sol_types::sol;
 use ark_serialize::CanonicalDeserialize;
@@ -1484,7 +1484,7 @@ async fn handle_bls_agg_response(
                 .block(BlockId::Number(BlockNumberOrTag::Pending))
                 .call()
                 .await;
-            
+
             match check_signatures_result {
                 Ok(check_signatures_result) => {
                     println!(
@@ -1522,7 +1522,7 @@ async fn handle_bls_agg_response(
                     );
                     match call_builder.send().await {
                         Ok(pending_tx) => {
-                            println!("Sent tx hash: {}",  pending_tx.tx_hash());
+                            println!("Sent tx hash: {}", pending_tx.tx_hash());
                         }
                         Err(err) => {
                             println!(
