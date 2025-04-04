@@ -3,6 +3,8 @@ use alloy_contract::Event;
 use alloy_primitives::{bytes, keccak256, Address, FixedBytes, Keccak256, TxHash, B256};
 use alloy_provider::{Identity, Provider, ProviderBuilder};
 use alloy_rpc_types_eth::Filter;
+use alloy_rpc_types_eth::BlockNumberOrTag;
+use alloy_rpc_types_eth::BlockId;
 use alloy_signer_local::{MnemonicBuilder, PrivateKeySigner};
 use alloy_sol_types::sol;
 use ark_serialize::CanonicalDeserialize;
@@ -1479,9 +1481,10 @@ async fn handle_bls_agg_response(
                     current_block_num as u32,
                     non_signer_stakes_and_signature_response.clone(),
                 )
+                .block(BlockId::Number(BlockNumberOrTag::Pending))
                 .call()
                 .await;
-
+            
             match check_signatures_result {
                 Ok(check_signatures_result) => {
                     println!(
@@ -1518,7 +1521,9 @@ async fn handle_bls_agg_response(
                         outputs,
                     );
                     match call_builder.send().await {
-                        Ok(_pending_tx) => {}
+                        Ok(pending_tx) => {
+                            println!("Sent tx hash: {}",  pending_tx.tx_hash());
+                        }
                         Err(err) => {
                             println!(
                                 "Transaction {:?} wasn't sent successfully: {err}",
@@ -1626,7 +1631,7 @@ fn monitor_issued_tasks(
                             )
                             .await;
 
-                            handle_bls_agg_response(bls_agg_response, secret_key.clone(), l1_http_endpoint.clone(), task_issuer, quorum_nums, current_block_num, ruleset.clone(), task_issued, &pool, id).await;
+                            handle_bls_agg_response(bls_agg_response, secret_key.clone(), l1_http_endpoint.clone(), task_issuer, quorum_nums, current_block_number, ruleset.clone(), task_issued, &pool, id).await;
 
                         },
                         Err(e) => println!(
