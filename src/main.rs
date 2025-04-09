@@ -1932,11 +1932,11 @@ async fn handle_task_issued_operator(
                 let g1: ark_bn254::g1::G1Affine =
                     ark_bn254::g1::G1Affine::deserialize_uncompressed(&signature_bytes[..])?;
 
+                let mut task_response_buffer = Vec::new();
                 let finish_reason_bytes = finish_reason.to_be_bytes();
-                let mut task_response_buffer = vec![0u8; 30];
                 task_response_buffer.extend_from_slice(&finish_reason_bytes);
-                task_response_buffer.extend_from_slice(&[0u8; 12]);
                 task_response_buffer.extend_from_slice(&hex::decode(&ruleset)?);
+
                 task_response_buffer.extend_from_slice(&stream_event.machineHash.to_vec());
 
                 let mut hasher = Keccak256::new();
