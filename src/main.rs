@@ -214,7 +214,7 @@ async fn main() {
             resp_payloadHash BYTEA,
             resp_outputMerkle BYTEA,
             callback_address BYTEA,
-            outputs BYTEA[]
+            outputs BYTEA[],
             resp_finish_reason INTEGER
         )
     ",
