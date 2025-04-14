@@ -1833,6 +1833,14 @@ async fn handle_task_issued_operator(
         BlsAggregatorService::new(avs_registry_service.clone(), get_test_logger());
     let mut response_digest_map = HashMap::new();
     let (handle, mut aggregator_response) = bls_agg_service.start();
+    let new_task = TaskMetadata::new(
+        TASK_INDEX,
+        current_block_num,
+        quorum_nums.clone(),
+        quorum_threshold_percentages.clone(),
+        time_to_expiry,
+    );
+    handle.initialize_task(new_task).await?;
 
     for operator in operators {
         let operator_id = operator.1.operator_id;
@@ -1925,15 +1933,6 @@ async fn handle_task_issued_operator(
                 task_response_buffer.extend_from_slice(&finish_result);
 
                 let task_response_digest = keccak256(&task_response_buffer);
-
-                let new_task = TaskMetadata::new(
-                    TASK_INDEX,
-                    current_block_num,
-                    quorum_nums.clone(),
-                    quorum_threshold_percentages.clone(),
-                    time_to_expiry,
-                );
-                handle.initialize_task(new_task).await?;
 
                 let signature = TaskSignature::new(
                     TASK_INDEX,
