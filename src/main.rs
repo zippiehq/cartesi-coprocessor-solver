@@ -386,7 +386,7 @@ async fn main() {
                                 let current_block_number =
                                     ws_provider.clone().get_block_number().await.unwrap();
                                 let quorum_nums = [0];
-                                let quorum_threshold_percentages = vec![100_u8];
+                                let quorum_threshold_percentages = vec![67_u8];
                                 let time_to_expiry = Duration::from_secs(10);
 
                                 match avs_registry_service
@@ -1589,7 +1589,7 @@ fn monitor_issued_tasks(
                         let callback: Vec<u8> = row.get(3);
                         let quorum_nums = [0];
                         let time_to_expiry = Duration::from_secs(10);
-                        let quorum_threshold_percentages = vec![100_u8];
+                        let quorum_threshold_percentages = vec![67_u8];
 
                         let task_issued = TaskIssued {
                             machineHash: B256::from_slice(&machine_hash),
@@ -2013,7 +2013,7 @@ fn new_task_issued_handler_l1(
     task::spawn({
         async move {
             let quorum_nums = [0];
-            let quorum_threshold_percentages = vec![100_u8];
+            let quorum_threshold_percentages = vec![67_u8];
             let time_to_expiry = Duration::from_secs(10);
 
             loop {
@@ -2145,7 +2145,7 @@ fn new_task_issued_handler_l2(
                 let l1_http_provider = alloy_provider::ProviderBuilder::new()
                     .on_http(l1_http_endpoint.parse().unwrap());
                 let quorum_nums = [0];
-                let quorum_threshold_percentages = vec![100_u8];
+                let quorum_threshold_percentages = vec![67_u8];
                 let time_to_expiry = Duration::from_secs(10);
 
                 match client
@@ -2310,8 +2310,6 @@ fn new_task_issued_handler_l2(
                                     secret_key_str.clone(),
                                     response,
                                     quorum_nums.into(),
-                                    100,
-                                    100,
                                     current_block_num as u32,
                                     non_signer_stakes_and_signature_response.clone(),
                                     l2Sender.clone(),
@@ -2385,8 +2383,6 @@ async fn send_message_to_l1(
     secret_key: String,
     resp: ResponseSol,
     quorum_numbers: Vec<u8>,
-    quorum_threshold_percentage: u32,
-    threshold_denominator: u8,
     block_number: u32,
     non_signer_stakes_and_signature_response: NonSignerStakesAndSignature,
     l2Sender: Address,
