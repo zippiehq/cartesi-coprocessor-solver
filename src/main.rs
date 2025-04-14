@@ -1954,7 +1954,16 @@ async fn handle_task_issued_operator(
                     quorums_avs_state, current_block_num
                 );
                 // XXX fix this for multiple operators
-                let processed_sig = handle.process_signature(signature).await.unwrap();
+                let processed_sig = handle.process_signature(signature).await;
+                if processed_sig.is_ok() {
+                    println!("signature from operator {:?} processed", operator_id);
+                } else {
+                    println!(
+                        "signature from operator {:?} not processed, error {:?}",
+                        operator_id,
+                        processed_sig.err().unwrap()
+                    );
+                }
 
                 response_digest_map.insert(
                     B256::from_slice(task_response_digest.as_slice()),
