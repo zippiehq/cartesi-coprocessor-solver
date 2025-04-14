@@ -1513,8 +1513,6 @@ async fn handle_bls_agg_response(
                             .0,
                         },
                         quorum_nums.into(),
-                        100,
-                        100,
                         current_block_num as u32,
                         non_signer_stakes_and_signature_response.clone().into(),
                         task_issued.callback,
@@ -2414,8 +2412,6 @@ async fn send_message_to_l1(
             .solverCallbackNoOutputs(
                 resp.clone(),
                 quorum_numbers.clone().into(),
-                quorum_threshold_percentage,
-                threshold_denominator,
                 block_number,
                 non_signer_stakes_and_signature_response.clone().into(),
                 l2Sender,
@@ -2428,8 +2424,6 @@ async fn send_message_to_l1(
         .solverCallbackNoOutputs(
             resp,
             quorum_numbers.into(),
-            quorum_threshold_percentage,
-            threshold_denominator,
             block_number,
             non_signer_stakes_and_signature_response.into(),
             l2Sender,
@@ -2939,8 +2933,6 @@ sol! {
         function solverCallbackOutputsOnly(
             ResponseSol calldata resp,
             bytes calldata quorumNumbers,
-            uint32 quorumThresholdPercentage,
-            uint8 thresholdDenominator,
             uint32 blockNumber,
             NonSignerStakesAndSignatureSol memory nonSignerStakesAndSignature,
             address callback_address,
@@ -2957,8 +2949,6 @@ sol! {
         function solverCallbackNoOutputs(
             ResponseSol calldata resp,
             bytes calldata quorumNumbers,
-            uint32 quorumThresholdPercentage,
-            uint8 thresholdDenominator,
             uint32 blockNumber,
             NonSignerStakesAndSignatureSol memory nonSignerStakesAndSignature,
             address l2Sender,
