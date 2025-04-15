@@ -7,6 +7,7 @@ use alloy_rpc_types_eth::BlockNumberOrTag;
 use alloy_rpc_types_eth::Filter;
 use alloy_signer_local::{MnemonicBuilder, PrivateKeySigner};
 use alloy_sol_types::sol;
+use alloy_sol_types::SolValue;
 use ark_serialize::CanonicalDeserialize;
 use bb8::Pool;
 use bb8_postgres::PostgresConnectionManager;
@@ -214,7 +215,8 @@ async fn main() {
             resp_payloadHash BYTEA,
             resp_outputMerkle BYTEA,
             callback_address BYTEA,
-            outputs BYTEA[]
+            outputs BYTEA[],
+            resp_finish_reason INTEGER
         )
     ",
         )
@@ -1439,7 +1441,7 @@ async fn handle_bls_agg_response(
     bls_agg_response: Result<
         (
             BlsAggregationServiceResponse,
-            HashMap<FixedBytes<32>, Vec<(u16, Vec<u8>)>>,
+            HashMap<alloy_primitives::FixedBytes<32>, (u16, Vec<u8>, Vec<(u16, Vec<u8>)>)>,
         ),
         anyhow::Error,
     >,
@@ -1465,12 +1467,24 @@ async fn handle_bls_agg_response(
             let contract = ResponseCallbackContract::new(task_issuer, &provider);
             let non_signer_stakes_and_signature_response =
                 agg_response_to_non_signer_stakes_and_signature(bls_agg_response.0.clone());
-            let outputs: Vec<alloy_primitives::Bytes> = bls_agg_response
+
+            let output_data = match bls_agg_response
                 .1
                 .get(&bls_agg_response.0.task_response_digest)
-                .unwrap()
+            {
+                Some(data) => data,
+                None => {
+                    log::error!("Could not find task response digest in bls_agg_response map");
+                    return;
+                }
+            };
+
+            let finish_reason = output_data.0;
+            let finish_result = &output_data.1;
+            let outputs: Vec<alloy_primitives::Bytes> = output_data
+                .2
                 .iter()
-                .map(|bytes| bytes.clone().1.into())
+                .map(|tuple_pair| tuple_pair.1.clone().into())
                 .collect();
             let root_provider = get_provider(l1_http_endpoint.as_str());
             let service_manager = IBLSSignatureChecker::new(task_issuer, root_provider);
@@ -1493,31 +1507,33 @@ async fn handle_bls_agg_response(
                         check_signatures_result._0.totalStakeForQuorum,
                         check_signatures_result._1
                     );
-                    let call_builder = contract.solverCallbackOutputsOnly(
-                        ResponseSol {
-                            ruleSet: Address::parse_checksummed(
-                                format!("0x{}", ruleset.clone()),
-                                None,
-                            )
+
+                    let response_sol = ResponseSol {
+                        finish_reason,
+                        ruleSet: Address::parse_checksummed(format!("0x{}", ruleset.clone()), None)
                             .unwrap(),
-                            machineHash: task_issued.machineHash,
-                            payloadHash: keccak256(&task_issued.input),
-                            outputMerkle: outputs_merkle::create_proofs(
-                                outputs
-                                    .iter()
-                                    .map(|element| keccak256(&element.0))
-                                    .collect(),
-                                HEIGHT,
-                            )
-                            .unwrap()
-                            .0,
-                        },
+                        machineHash: task_issued.machineHash,
+                        payloadHash: keccak256(&task_issued.input),
+                        outputMerkle: outputs_merkle::create_proofs(
+                            outputs
+                                .iter()
+                                .map(|element| keccak256(&element.0))
+                                .collect(),
+                            HEIGHT,
+                        )
+                        .unwrap()
+                        .0,
+                    };
+
+                    let call_builder = contract.solverCallbackOutputsOnly(
+                        response_sol,
                         quorum_nums.into(),
                         current_block_num as u32,
                         non_signer_stakes_and_signature_response.clone().into(),
                         task_issued.callback,
                         outputs,
                     );
+
                     match call_builder.send().await {
                         Ok(pending_tx) => {
                             println!("Sent tx hash: {}", pending_tx.tx_hash());
@@ -1572,6 +1588,12 @@ fn monitor_issued_tasks(
 ) {
     task::spawn({
         async move {
+            let client = pool.get().await.unwrap();
+            let _ = client.execute(
+                "ALTER TABLE finalization_data ADD COLUMN IF NOT EXISTS resp_finish_reason INTEGER DEFAULT 0",
+                &[],
+            ).await;
+
             loop {
                 let client = pool.get().await.unwrap();
                 while let Ok(row) = client
@@ -1654,7 +1676,7 @@ fn monitor_issued_tasks(
                 let input: Vec<u8> = row.get(2);
 
                 let row = match client.query_one(
-                    "SELECT resp_ruleSet, resp_outputMerkle, callback_address, outputs
+                    "SELECT resp_ruleSet, resp_outputMerkle, callback_address, outputs, resp_finish_reason
                      FROM finalization_data WHERE resp_machineHash = $1 AND resp_payloadHash = $2",
                     &[&machine_hash, &input],
                 ).await {
@@ -1669,6 +1691,7 @@ fn monitor_issued_tasks(
                 let resp_output_merkle: Vec<u8> = row.get(1);
                 let callback_address_bytes: Vec<u8> = row.get(2);
                 let outputs_db: Vec<Vec<u8>> = row.get(3);
+                let resp_finish_reason: i32 = row.get(4);
 
                 let rule_set_addr = Address::from_slice(&resp_rule_set);
                 let machine_hash_fixed = B256::from_slice(&machine_hash);
@@ -1677,6 +1700,7 @@ fn monitor_issued_tasks(
                 let callback_addr = Address::from_slice(&callback_address_bytes);
 
                 let resp = ResponseSol {
+                    finish_reason: resp_finish_reason as u16,
                     ruleSet: rule_set_addr,
                     machineHash: machine_hash_fixed,
                     payloadHash: payload_hash_fixed,
@@ -1825,7 +1849,7 @@ async fn handle_task_issued_operator(
 ) -> Result<
     (
         BlsAggregationServiceResponse,
-        HashMap<alloy_primitives::FixedBytes<32>, Vec<(u16, Vec<u8>)>>,
+        HashMap<alloy_primitives::FixedBytes<32>, (u16, Vec<u8>, Vec<(u16, Vec<u8>)>)>,
     ),
     anyhow::Error,
 > {
@@ -1871,25 +1895,30 @@ async fn handle_task_issued_operator(
                     }
                 };
 
-                let finish_callback: Vec<serde_json::Value> =
-                    match response_json.get("finish_callback") {
-                        Some(serde_json::Value::Array(finish_callback)) => {
-                            if finish_callback.len() == 2
-                                && finish_callback[0].is_number()
-                                && finish_callback[1].is_array()
-                            {
-                                finish_callback[1].as_array().unwrap().to_vec()
-                            } else {
-                                finish_callback.to_vec()
-                            }
+                let (finish_reason, finish_result) = match response_json.get("finish_callback") {
+                    Some(serde_json::Value::Array(finish_callback)) => {
+                        if finish_callback.len() == 2
+                            && finish_callback[0].is_number()
+                            && finish_callback[1].is_array()
+                        {
+                            let reason = finish_callback[0].as_u64().unwrap() as u16;
+                            let result = extract_number_array(
+                                finish_callback[1].as_array().unwrap().to_vec(),
+                            );
+                            println!("reason {:?}", reason);
+                            println!("result {:?}", result);
+                            (reason, result)
+                        } else {
+                            (0u16, extract_number_array(finish_callback.to_vec()))
                         }
-                        _ => {
-                            return Err(anyhow::anyhow!(
-                                "No finish_callback found in request response"
-                            ));
-                        }
-                    };
-                let finish_result = extract_number_array(finish_callback);
+                    }
+                    _ => {
+                        return Err(anyhow::anyhow!(
+                            "No finish_callback found in request response"
+                        ));
+                    }
+                };
+
                 let outputs_vector: Vec<(u16, Vec<u8>)> =
                     match response_json.get("outputs_callback_vector") {
                         Some(outputs_callback) => serde_json::from_value(outputs_callback.clone())?,
@@ -1921,8 +1950,13 @@ async fn handle_task_issued_operator(
                 let g1: ark_bn254::g1::G1Affine =
                     ark_bn254::g1::G1Affine::deserialize_uncompressed(&signature_bytes[..])?;
 
-                let mut task_response_buffer = vec![0u8; 12];
+                let mut task_response_buffer = vec![0u8; 30];
+                let finish_reason_bytes = finish_reason.to_be_bytes();
+                task_response_buffer.extend_from_slice(&finish_reason_bytes);
+                task_response_buffer.extend_from_slice(&[0u8; 12]);
+
                 task_response_buffer.extend_from_slice(&hex::decode(&ruleset)?);
+
                 task_response_buffer.extend_from_slice(&stream_event.machineHash.to_vec());
 
                 let mut hasher = Keccak256::new();
@@ -1959,7 +1993,7 @@ async fn handle_task_issued_operator(
                     println!("signature from operator {:?} processed", operator_id);
                     response_digest_map.insert(
                         B256::from_slice(task_response_digest.as_slice()),
-                        outputs_vector.clone(),
+                        (finish_reason, finish_result, outputs_vector.clone()),
                     );
                 } else {
                     println!(
@@ -2218,13 +2252,14 @@ fn new_task_issued_handler_l2(
                                     agg_response_to_non_signer_stakes_and_signature(
                                         bls_agg_response.0.clone(),
                                     );
-                                let outputs: Vec<alloy_primitives::Bytes> = bls_agg_response
-                                    .1
-                                    .get(&bls_agg_response.0.task_response_digest)
-                                    .unwrap()
-                                    .iter()
-                                    .map(|bytes| bytes.clone().1.into())
-                                    .collect();
+                                    let output_data = bls_agg_response.1.get(&bls_agg_response.0.task_response_digest).unwrap();
+                                    let finish_reason = output_data.0;
+                                    let finish_result = &output_data.1;
+
+                                    let outputs: Vec<alloy_primitives::Bytes> = output_data.2
+                                        .iter()
+                                        .map(|bytes| bytes.clone().1.into())
+                                        .collect();
 
                                 let keccak_outputs: Vec<B256> =
                                     outputs.iter().map(|o| keccak256(&o.0)).collect();
@@ -2250,6 +2285,7 @@ fn new_task_issued_handler_l2(
                                 let resp_output_merkle = output_merkle_fixed.0.to_vec();
 
                                 let response = ResponseSol {
+                                    finish_reason: bls_agg_response.1.get(&bls_agg_response.0.task_response_digest).unwrap().0,
                                     ruleSet: Address::parse_checksummed(
                                         format!("0x{}", ruleset.clone()),
                                         None,
@@ -2274,8 +2310,9 @@ fn new_task_issued_handler_l2(
                                                     resp_payloadHash,
                                                     resp_outputMerkle,
                                                     callback_address,
-                                                    outputs
-                                                ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                                                    outputs,
+                                                    resp_finish_reason
+                                                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                                                 ON CONFLICT (resp_responseHash) DO NOTHING",
                                         &[
                                             &resp_response_hash,
@@ -2285,6 +2322,7 @@ fn new_task_issued_handler_l2(
                                             &resp_output_merkle,
                                             &callback_address_bytes,
                                             &outputs_db,
+                                            &(bls_agg_response.1.get(&bls_agg_response.0.task_response_digest).unwrap_or(&(0, Vec::new(), Vec::new())).0 as i32),
                                         ],
                                     )
                                     .await
@@ -2595,7 +2633,7 @@ async fn subscribe_task_completed_l2(
                     let client = pool.get().await.unwrap();
 
                     let row = match client.query_one(
-                        "SELECT resp_ruleSet, resp_machineHash, resp_payloadHash, resp_outputMerkle, callback_address, outputs
+                        "SELECT resp_ruleSet, resp_machineHash, resp_payloadHash, resp_outputMerkle, callback_address, outputs, resp_finish_reason
                          FROM finalization_data WHERE resp_responseHash = $1",
                         &[&task_completed_event.responseHash.0.to_vec()],
                     ).await {
@@ -2612,6 +2650,7 @@ async fn subscribe_task_completed_l2(
                     let resp_output_merkle: Vec<u8> = row.get(3);
                     let callback_address_bytes: Vec<u8> = row.get(4);
                     let outputs_db: Vec<Vec<u8>> = row.get(5);
+                    let resp_finish_reason: i32 = row.get(6);
 
                     let rule_set_addr = Address::from_slice(&resp_rule_set);
                     let machine_hash_fixed = B256::from_slice(&resp_machine_hash);
@@ -2620,6 +2659,7 @@ async fn subscribe_task_completed_l2(
                     let callback_addr = Address::from_slice(&callback_address_bytes);
 
                     let resp = ResponseSol {
+                        finish_reason: resp_finish_reason as u16,
                         ruleSet: rule_set_addr,
                         machineHash: machine_hash_fixed,
                         payloadHash: payload_hash_fixed,
@@ -2902,6 +2942,7 @@ sol!(
 sol! {
     #[derive(Debug, Default)]
     struct ResponseSol {
+        uint16 finish_reason;
         address ruleSet;
         bytes32 machineHash;
         bytes32 payloadHash;
