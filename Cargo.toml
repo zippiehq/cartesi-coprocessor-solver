@@ -49,3 +49,5 @@ uuid = { version = "1.12.0", features = ["v4"] }
 urlencoding = "2.1.3"
 chrono = "0.4.39"
 env_logger = "0.10.0"
+cbor = "0.4.1"
+rand = "0.9.1"
