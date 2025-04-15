@@ -1957,6 +1957,10 @@ async fn handle_task_issued_operator(
                 let processed_sig = handle.process_signature(signature).await;
                 if processed_sig.is_ok() {
                     println!("signature from operator {:?} processed", operator_id);
+                    response_digest_map.insert(
+                        B256::from_slice(task_response_digest.as_slice()),
+                        outputs_vector.clone(),
+                    );
                 } else {
                     println!(
                         "signature from operator {:?} not processed, error {:?}",
@@ -1964,11 +1968,6 @@ async fn handle_task_issued_operator(
                         processed_sig.err().unwrap()
                     );
                 }
-
-                response_digest_map.insert(
-                    B256::from_slice(task_response_digest.as_slice()),
-                    outputs_vector.clone(),
-                );
             }
             None => {
                 return Err(anyhow::anyhow!(
