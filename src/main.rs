@@ -1527,7 +1527,11 @@ async fn handle_bls_agg_response(
 
                     // First check if V2 supports this reason
                     let callback_contract = ICoprocessorCallback::new(task_issuer, &provider);
-                    let supports_v2 = match callback_contract.coprocessorCallbackV2SupportsReason(finish_reason).call().await {
+                    let supports_v2 = match callback_contract
+                        .coprocessorCallbackV2SupportsReason(finish_reason)
+                        .call()
+                        .await
+                    {
                         Ok(supports) => supports._0, // Access the boolean value from the return struct
                         Err(_) => {
                             // If the call reverts, use version 1
@@ -1567,7 +1571,10 @@ async fn handle_bls_agg_response(
 
                     if !supports_v2 {
                         // If V2 doesn't support this reason, consider the job done
-                        println!("Callback contract doesn't support reason {}, considering job done", finish_reason);
+                        println!(
+                            "Callback contract doesn't support reason {}, considering job done",
+                            finish_reason
+                        );
                         // Update status after task was handled (no callback needed)
                         let client = pool.get().await.unwrap();
                         client
