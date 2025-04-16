@@ -2939,6 +2939,17 @@ sol!(
     }
 );
 
+sol!(
+    #[sol(rpc)]
+    contract ICoprocessorCallback {
+        function coprocessorCallbackOutputsOnly(bytes32 machineHash, bytes32 payloadHash, bytes[] calldata outputs)
+            external;
+        function coprocessorCallbackV2(uint16 reason, bytes32 machineHash, bytes32 payloadHash, bytes[] calldata outputs)
+            external;
+        function coprocessorCallbackV2SupportsReason(uint16 reason) external returns (bool);
+    }
+);
+
 sol! {
     #[derive(Debug, Default)]
     struct ResponseSol {
