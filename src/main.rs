@@ -1525,6 +1525,62 @@ async fn handle_bls_agg_response(
                         .0,
                     };
 
+                    // First check if V2 supports this reason
+                    let callback_contract = ICoprocessorCallback::new(task_issuer, &provider);
+                    let supports_v2 = match callback_contract.coprocessorCallbackV2SupportsReason(finish_reason).call().await {
+                        Ok(supports) => supports._0, // Access the boolean value from the return struct
+                        Err(_) => {
+                            // If the call reverts, use version 1
+                            let call_builder = contract.solverCallbackOutputsOnly(
+                                response_sol,
+                                quorum_nums.into(),
+                                current_block_num as u32,
+                                non_signer_stakes_and_signature_response.clone().into(),
+                                task_issued.callback,
+                                outputs,
+                                1, // version 1
+                            );
+
+                            match call_builder.send().await {
+                                Ok(pending_tx) => {
+                                    println!("Sent tx hash: {}", pending_tx.tx_hash());
+                                }
+                                Err(err) => {
+                                    println!(
+                                        "Transaction {:?} wasn't sent successfully: {err}",
+                                        hex::encode(call_builder.calldata())
+                                    );
+                                }
+                            }
+                            // Update status after task was handled with version 1
+                            let client = pool.get().await.unwrap();
+                            client
+                                .execute(
+                                    "UPDATE issued_tasks SET status = $1 WHERE id = $2;",
+                                    &[&task_status::handled, &id],
+                                )
+                                .await
+                                .unwrap();
+                            return;
+                        }
+                    };
+
+                    if !supports_v2 {
+                        // If V2 doesn't support this reason, consider the job done
+                        println!("Callback contract doesn't support reason {}, considering job done", finish_reason);
+                        // Update status after task was handled (no callback needed)
+                        let client = pool.get().await.unwrap();
+                        client
+                            .execute(
+                                "UPDATE issued_tasks SET status = $1 WHERE id = $2;",
+                                &[&task_status::handled, &id],
+                            )
+                            .await
+                            .unwrap();
+                        return;
+                    }
+
+                    // If we get here, V2 supports the reason, use version 2
                     let call_builder = contract.solverCallbackOutputsOnly(
                         response_sol,
                         quorum_nums.into(),
@@ -1532,6 +1588,7 @@ async fn handle_bls_agg_response(
                         non_signer_stakes_and_signature_response.clone().into(),
                         task_issued.callback,
                         outputs,
+                        2, // version 2
                     );
 
                     match call_builder.send().await {
@@ -1546,7 +1603,7 @@ async fn handle_bls_agg_response(
                         }
                     }
 
-                    //Update status after task was handled
+                    //Update status after task was handled with version 2
                     let client = pool.get().await.unwrap();
                     client
                         .execute(
@@ -2991,7 +3048,8 @@ sol! {
             uint32 blockNumber,
             NonSignerStakesAndSignatureSol memory nonSignerStakesAndSignature,
             address callback_address,
-            bytes[] calldata outputs
+            bytes[] calldata outputs,
+            uint8 callback_version
         );
     }
     #[sol(rpc)]
