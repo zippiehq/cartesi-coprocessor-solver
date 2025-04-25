@@ -1,4 +1,4 @@
-FROM rust:latest as builder
+FROM rust:1.85.1 as builder
 RUN apt-get update && apt-get install -y protobuf-compiler clang curl
 
 WORKDIR /cartesi-coprocessor-solver

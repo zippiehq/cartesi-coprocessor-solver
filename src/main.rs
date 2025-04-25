@@ -1,7 +1,7 @@
 use alloy::signers::k256::SecretKey;
 use alloy_contract::Event;
-use alloy_primitives::{bytes, keccak256, Address, FixedBytes, Keccak256, TxHash, B256};
-use alloy_provider::{Identity, Provider, ProviderBuilder};
+use alloy_primitives::{keccak256, Address, FixedBytes, Keccak256, TxHash, B256};
+use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types_eth::BlockId;
 use alloy_rpc_types_eth::BlockNumberOrTag;
 use alloy_rpc_types_eth::Filter;
@@ -27,7 +27,6 @@ use eigen_types::avs_state::OperatorAvsState;
 use eigen_utils::slashing::middleware::iblssignaturechecker::{
     IBLSSignatureChecker, IBLSSignatureCheckerTypes::NonSignerStakesAndSignature, BN254::G1Point,
 };
-use ethers::core::k256::ecdsa::signature;
 use futures_util::FutureExt;
 use futures_util::{StreamExt, TryStreamExt};
 use hex::FromHex;
@@ -36,11 +35,13 @@ use hyper::{
     service::{make_service_fn, service_fn},
     Body, Client, Request, Response, Server, StatusCode,
 };
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::error::Error;
 use std::io::Write;
 use std::str::FromStr;
+use std::thread::sleep;
 use std::{collections::HashMap, convert::Infallible, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{
     sync::Mutex,
@@ -51,9 +52,6 @@ use tokio_util::sync::CancellationToken;
 use ICoprocessor::TaskIssued;
 mod outputs_merkle;
 use alloy_network::EthereumWallet;
-use alloy_provider::fillers::{
-    BlobGasFiller, ChainIdFiller, FillProvider, GasFiller, JoinFill, NonceFiller, WalletFiller,
-};
 use futures_util::stream;
 use serde_json::json;
 use std::env;
@@ -179,6 +177,7 @@ async fn main() {
         )
         .await
         .unwrap();
+
     client
         .batch_execute(
             "
@@ -194,10 +193,8 @@ async fn main() {
         .unwrap();
     client
         .batch_execute(
-            "
-        CREATE UNIQUE INDEX IF NOT EXISTS unique_machine_input_callback
-        ON issued_tasks ((machineHash || md5(input) || callback))
-",
+            "CREATE UNIQUE INDEX IF NOT EXISTS unique_machine_input_callback
+            ON issued_tasks ((machineHash || md5(input) || callback))",
         )
         .await
         .unwrap();
@@ -207,8 +204,7 @@ async fn main() {
 
     client
         .batch_execute(
-            "
-        CREATE TABLE IF NOT EXISTS finalization_data (
+            "CREATE TABLE IF NOT EXISTS finalization_data (
             resp_responseHash BYTEA UNIQUE,
             resp_ruleSet BYTEA,
             resp_machineHash BYTEA,
@@ -1393,6 +1389,7 @@ async fn main() {
             config.secret_key.clone(),
             config.payment_phrase.clone(),
         );
+
         //Subscriber which handles new tasks received from DB
         new_task_issued_handler_l1(
             config.l1_ws_endpoint.clone(),
@@ -1428,17 +1425,18 @@ async fn main() {
         config.secret_key.clone(),
         Address::from_str(&config.l2_coprocessor_address).unwrap(),
         config.socket.clone(),
-        config.ruleset,
+        config.ruleset.clone(),
         config.max_ops,
         current_block_num,
         sockets_map.clone(),
         config.task_issuer,
     );
+
     server.await.unwrap();
 }
 
 async fn handle_bls_agg_response(
-    bls_agg_response: Result<
+    bls_agg_response: &Result<
         (
             BlsAggregationServiceResponse,
             HashMap<alloy_primitives::FixedBytes<32>, (u16, Vec<u8>, Vec<(u16, Vec<u8>)>)>,
@@ -1451,9 +1449,9 @@ async fn handle_bls_agg_response(
     quorum_nums: [u8; 1],
     current_block_num: u64,
     ruleset: String,
-    task_issued: TaskIssued,
+    task_issued: &TaskIssued,
     pool: &Pool<PostgresConnectionManager<NoTls>>,
-    id: i32,
+    id: &i32,
 ) {
     match bls_agg_response {
         Ok(bls_agg_response) => {
@@ -1650,6 +1648,8 @@ fn monitor_issued_tasks(
     sockets_map: Arc<Mutex<HashMap<Vec<u8>, String>>>,
     task_issuer: Address,
 ) {
+    let quorum_nums = [0];
+
     task::spawn({
         async move {
             let client = pool.get().await.unwrap();
@@ -1660,6 +1660,35 @@ fn monitor_issued_tasks(
 
             loop {
                 let client = pool.get().await.unwrap();
+                let quorum_threshold_percentages = vec![67_u8];
+                let time_to_expiry = Duration::from_secs(10);
+
+                let current_block_number = {
+                    let ws_connect = alloy_provider::WsConnect::new(l1_ws_endpoint.clone());
+                    let ws_provider = alloy_provider::ProviderBuilder::new()
+                        .on_ws(ws_connect)
+                        .await
+                        .unwrap();
+                    ws_provider.get_block_number().await.unwrap()
+                };
+
+                let operators = match avs_registry_service
+                    .clone()
+                    .get_operators_avs_state_at_block(current_block_number, &quorum_nums)
+                    .await
+                {
+                    Ok(operators) => operators,
+                    Err(e) => {
+                        println!(
+                            "no operators found at block {:?}. Error {:?}",
+                            current_block_number, e
+                        );
+                        continue;
+                    }
+                };
+
+                let mut machine_hashes_and_payloads: Vec<(String, Vec<u8>)> = Vec::new();
+                // Handle issued_tasks which wait for handling
                 while let Ok(row) = client
                     .query_one("UPDATE issued_tasks SET status = $1 WHERE id = ( SELECT id FROM issued_tasks WHERE status = $2 ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING *;",
                 &[
@@ -1669,75 +1698,95 @@ fn monitor_issued_tasks(
                     )
                     .await
                 {
-                        let id: i32 = row.get(0);
                         let machine_hash: Vec<u8> = row.get(1);
-                        let input: Vec<u8> = row.get(2);
-                        let callback: Vec<u8> = row.get(3);
-                        let quorum_nums = [0];
-                        let time_to_expiry = Duration::from_secs(10);
-                        let quorum_threshold_percentages = vec![67_u8];
+                        let payload: Vec<u8> = row.get(2);
 
-                        let task_issued = TaskIssued {
-                            machineHash: B256::from_slice(&machine_hash),
-                            input: input.into(),
-                            callback: Address::from_slice(&callback),
-                        };
-                        let current_block_number = {
-                            let ws_connect = alloy_provider::WsConnect::new(l1_ws_endpoint.clone());
-                            let ws_provider = alloy_provider::ProviderBuilder::new()
-                                .on_ws(ws_connect)
-                                .await
-                                .unwrap();
-                            ws_provider.get_block_number().await.unwrap()
-                        };
-                        match avs_registry_service
-                        .clone()
-                        .get_operators_avs_state_at_block(
-                            current_block_number,
-                            &quorum_nums,
-                        )
-                        .await
-                    {
-                        Ok(operators) => {
-                            let bls_agg_response = handle_task_issued_operator(
-                                operators,
-                                false,
-                                sockets_map.clone(),
-                                config_socket.clone(),
-                                task_issued.clone(),
-                                avs_registry_service.clone(),
-                                time_to_expiry,
-                                ruleset.clone(),
-                                max_ops,
-                                current_block_number,
-                                quorum_nums.to_vec(),
-                                quorum_threshold_percentages.clone(),
-                            )
-                            .await;
+                        log::debug!("New issued_task waiting for handling was found with machine_hash - {:?} and payload - {:?}", machine_hash, payload);
 
-                            handle_bls_agg_response(bls_agg_response, secret_key.clone(), l1_http_endpoint.clone(), task_issuer, quorum_nums, current_block_number, ruleset.clone(), task_issued, &pool, id).await;
-
-                        },
-                        Err(e) => println!(
-                            "no operators found at block {:?}. Error {:?}",
-                            current_block_number, e
-                        ),
-                    };
+                        machine_hashes_and_payloads.push((hex::encode(machine_hash), payload));
                 }
-
-                while let Ok(row) = client
-                .query_one("UPDATE issued_tasks SET status = $1 WHERE id = ( SELECT id FROM issued_tasks WHERE status = $2 ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING *;",
-            &[
-                &task_status::finalized_on_l2,
-                &task_status::sent_to_l1,
-            ],
+                // Call add_classic_request request for collected ids to collect results
+                call_add_classic_request(
+                    &operators,
+                    sockets_map.clone(),
+                    config_socket.clone(),
+                    machine_hashes_and_payloads.clone(),
+                    &ruleset.clone(),
+                    max_ops,
                 )
                 .await
-            {
+                .unwrap();
 
-                let id: i32 = row.get(0);
-                let machine_hash: Vec<u8> = row.get(1);
-                let input: Vec<u8> = row.get(2);
+                // Collect tasks that are in progress, locking them
+                let rows = client
+                    .query(
+                        "SELECT * FROM issued_tasks WHERE status = $1 ORDER BY id FOR UPDATE SKIP LOCKED;", 
+                        &[&task_status::in_progress],
+                    )
+                    .await
+                    .unwrap();
+
+                let mut ids = HashMap::new();
+
+                for row in rows {
+                    let id: i32 = row.get(0);
+                    log::debug!("Found in-progress issued_task with id {:?}", id);
+
+                    let machine_hash: Vec<u8> = row.get(1);
+                    let input: Vec<u8> = row.get(2);
+                    let callback: Vec<u8> = row.get(3);
+
+                    let task_issued = TaskIssued {
+                        machineHash: B256::from_slice(&machine_hash),
+                        input: input.into(),
+                        callback: Address::from_slice(&callback),
+                    };
+
+                    ids.insert(id, task_issued);
+                }
+
+                loop {
+                    // Call get_classic_request for collected tasks while all of them won't be handled. call_get_classic_request removes id from ids once it was handled.
+                    if !ids.is_empty() {
+                        let result = call_get_classic_request(
+                            operators.clone(),
+                            false,
+                            sockets_map.clone(),
+                            config_socket.clone(),
+                            &mut ids,
+                            avs_registry_service.clone(),
+                            time_to_expiry,
+                            ruleset.clone(),
+                            current_block_num,
+                            quorum_threshold_percentages.clone(),
+                            secret_key.clone(),
+                            l1_http_endpoint.clone(),
+                            task_issuer.clone(),
+                            quorum_nums,
+                            &pool,
+                        )
+                        .await;
+
+                        std::thread::sleep(Duration::from_secs(20));
+                    } else {
+                        break;
+                    }
+                }
+
+                // Handle issued tasks which was sent to l1 by finalizing them on l2
+                while let Ok(row) = client
+                    .query_one("UPDATE issued_tasks SET status = $1 WHERE id = ( SELECT id FROM issued_tasks WHERE status = $2 ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING *;",
+                &[
+                    &task_status::finalized_on_l2,
+                    &task_status::sent_to_l1,
+                ],
+                    )
+                    .await
+                {
+
+                    let id: i32 = row.get(0);
+                    let machine_hash: Vec<u8> = row.get(1);
+                    let input: Vec<u8> = row.get(2);
 
                 let row = match client.query_one(
                     "SELECT resp_ruleSet, resp_outputMerkle, callback_address, outputs, resp_finish_reason
@@ -1757,11 +1806,11 @@ fn monitor_issued_tasks(
                 let outputs_db: Vec<Vec<u8>> = row.get(3);
                 let resp_finish_reason: i32 = row.get(4);
 
-                let rule_set_addr = Address::from_slice(&resp_rule_set);
-                let machine_hash_fixed = B256::from_slice(&machine_hash);
-                let payload_hash_fixed = keccak256(&input);
-                let output_merkle_fixed = B256::from_slice(&resp_output_merkle);
-                let callback_addr = Address::from_slice(&callback_address_bytes);
+                    let rule_set_addr = Address::from_slice(&resp_rule_set);
+                    let machine_hash_fixed = B256::from_slice(&machine_hash);
+                    let payload_hash_fixed = keccak256(&input);
+                    let output_merkle_fixed = B256::from_slice(&resp_output_merkle);
+                    let callback_addr = Address::from_slice(&callback_address_bytes);
 
                 let resp = ResponseSol {
                     finish_reason: resp_finish_reason as u16,
@@ -1771,29 +1820,29 @@ fn monitor_issued_tasks(
                     outputMerkle: output_merkle_fixed,
                 };
 
-                if let Err(err) = finalize_on_l2(
-                    &l2_http_endpoint,
-                    l2_coprocessor_address,
-                    &secret_key,
-                    resp,
-                    outputs_db,
-                    callback_addr,
-                )
-                .await
-                {
-                    eprintln!("error calling finalize_on_l2: {:?}", err);
-                } else {
-                    log::info!("successfully finalized on L2!");
-                }
+                    if let Err(err) = finalize_on_l2(
+                        &l2_http_endpoint,
+                        l2_coprocessor_address,
+                        &secret_key,
+                        resp,
+                        outputs_db,
+                        callback_addr,
+                    )
+                    .await
+                    {
+                        eprintln!("error calling finalize_on_l2: {:?}", err);
+                    } else {
+                        log::info!("successfully finalized on L2!");
+                    }
 
-                client
-                .execute(
-                    "UPDATE issued_tasks SET status = $1 WHERE id = $2;",
-                    &[&task_status::finalized_on_l2, &id],
-                )
-                .await
-                .unwrap();
-            }
+                    client
+                    .execute(
+                        "UPDATE issued_tasks SET status = $1 WHERE id = $2;",
+                        &[&task_status::finalized_on_l2, &id],
+                    )
+                    .await
+                    .unwrap();
+                }
                 wait_for_new_records(postgres_connect_request.clone()).await;
             }
         }
@@ -1892,6 +1941,286 @@ fn query_operator_socket_update(
             }
         }
     })
+}
+
+async fn call_add_classic_request(
+    operators: &HashMap<FixedBytes<32>, OperatorAvsState>,
+    sockets_map: Arc<Mutex<HashMap<Vec<u8>, String>>>,
+    config_socket: String,
+    machine_hashes_and_payloads: Vec<(String, Vec<u8>)>,
+    ruleset: &str,
+    max_ops: u64,
+) -> Result<(), anyhow::Error> {
+    for operator in operators {
+        let operator_id = operator.1.operator_id;
+        let sockets_map = sockets_map.lock().await;
+
+        let mut machine_hashes_and_payloads_encoder = cbor::Encoder::from_memory();
+        machine_hashes_and_payloads_encoder
+            .encode(&machine_hashes_and_payloads)
+            .unwrap();
+
+        let machine_hashes_and_payloads = machine_hashes_and_payloads_encoder.into_bytes();
+
+        match sockets_map.get(&operator_id.to_vec()) {
+            Some(mut socket) => {
+                if socket == "Not Needed" {
+                    socket = &config_socket;
+                }
+
+                let request = Request::builder()
+                    .method("POST")
+                    .header("X-Ruleset", ruleset)
+                    .header("X-Max-Ops", max_ops)
+                    .uri(format!("{}/start_classic", socket))
+                    .body(Body::from(machine_hashes_and_payloads))?;
+
+                let client = Client::new();
+                let _ = client.request(request).await?;
+            }
+            None => {
+                return Err(anyhow::anyhow!(
+                    "No socket for operator_id {:?}",
+                    hex::encode(operator_id)
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn call_get_classic_request(
+    operators: HashMap<FixedBytes<32>, OperatorAvsState>,
+    generate_proofs: bool,
+    sockets_map: Arc<Mutex<HashMap<Vec<u8>, String>>>,
+    config_socket: String,
+    ids_issued_tasks: &mut HashMap<i32, TaskIssued>,
+    avs_registry_service: AvsRegistryServiceChainCaller<
+        AvsRegistryChainReader,
+        OperatorInfoServiceInMemory,
+    >,
+    time_to_expiry: Duration,
+    ruleset: String,
+    current_block_num: u64,
+    quorum_threshold_percentages: Vec<u8>,
+    secret_key: String,
+    l1_http_endpoint: String,
+    task_issuer: Address,
+    quorum_nums: [u8; 1],
+    pool: &Pool<PostgresConnectionManager<NoTls>>,
+) -> Result<(), anyhow::Error> {
+    let bls_agg_service =
+        BlsAggregatorService::new(avs_registry_service.clone(), get_test_logger());
+    let mut response_digest_map = HashMap::new();
+    let mut handled_ids_and_issued_tasks = HashMap::new();
+
+    let (handle, mut aggregator_response) = bls_agg_service.start();
+
+    let ids: Vec<u8> = ids_issued_tasks
+        .clone()
+        .iter()
+        .map(|id_and_issued_task| *id_and_issued_task.0 as u8)
+        .collect();
+
+    for id in ids.clone() {
+        let new_task = TaskMetadata::new(
+            id as u32,
+            current_block_num,
+            quorum_nums.clone().to_vec(),
+            quorum_threshold_percentages.clone(),
+            time_to_expiry,
+        );
+
+        handle.initialize_task(new_task).await.unwrap();
+    }
+
+    for (id, issued_task) in ids_issued_tasks.clone() {
+        for operator in operators.clone() {
+            let operator_id = operator.1.operator_id;
+            let sockets_map = sockets_map.lock().await;
+            match sockets_map.get(&operator_id.to_vec()) {
+                Some(mut socket) => {
+                    if socket == "Not Needed" {
+                        socket = &config_socket;
+                    }
+                    let request = Request::builder()
+                        .method("GET")
+                        .uri(format!("{}/get_classic", socket))
+                        .body(Body::from(ids.clone()))?;
+                    log::info!("{}/get_classic", socket);
+                    log::debug!("{}/get_classic ids {:?}", socket, ids);
+                    let client = Client::new();
+                    let response = client.request(request).await?;
+                    let response_json = serde_json::from_slice::<serde_json::Value>(
+                        &hyper::body::to_bytes(response)
+                            .await
+                            .expect(format!("Error requesting").as_str())
+                            .to_vec(),
+                    )
+                    .unwrap();
+                    if response_json == serde_json::Value::Null {
+                        return Err(anyhow::anyhow!(
+                            "Error requesting get classic. No returned data"
+                        ));
+                    }
+
+                    for (_, response_value) in response_json.as_object().unwrap().iter() {
+                        let response_signature: String = match response_value.get("signature") {
+                            Some(serde_json::Value::String(sign)) => sign.to_string(),
+                            _ => {
+                                return Err(anyhow::anyhow!(
+                                    "No signature found in request response"
+                                ));
+                            }
+                        };
+                        let (finish_reason, finish_result) =
+                            match response_value.get("finish_callback") {
+                                Some(serde_json::Value::Array(finish_callback)) => {
+                                    if finish_callback.len() == 2
+                                        && finish_callback[0].is_number()
+                                        && finish_callback[1].is_array()
+                                    {
+                                        let reason = finish_callback[0].as_u64().unwrap() as u16;
+                                        let result = extract_number_array(
+                                            finish_callback[1].as_array().unwrap().to_vec(),
+                                        );
+                                        (reason, result)
+                                    } else {
+                                        (0u16, extract_number_array(finish_callback.to_vec()))
+                                    }
+                                }
+                                _ => {
+                                    return Err(anyhow::anyhow!(
+                                        "No finish_callback found in request response"
+                                    ));
+                                }
+                            };
+
+                        let outputs_vector: Vec<(u16, Vec<u8>)> =
+                            match response_value.get("outputs_callback_vector") {
+                                Some(outputs_callback) => {
+                                    serde_json::from_value(outputs_callback.clone())?
+                                }
+                                _ => {
+                                    return Err(anyhow::anyhow!(
+                                        "No outputs_callback_vector found in request response"
+                                    ));
+                                }
+                            };
+                        if generate_proofs {
+                            let mut keccak_outputs = Vec::new();
+
+                            for output in outputs_vector.clone() {
+                                let mut hasher = Keccak256::new();
+                                hasher.update(output.1.clone());
+                                keccak_outputs.push(hasher.finalize());
+                            }
+
+                            let proofs = outputs_merkle::create_proofs(keccak_outputs, HEIGHT)
+                                .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+                            if proofs.0.to_vec() != finish_result {
+                                return Err(anyhow::anyhow!("Outputs weren't proven successfully"));
+                            }
+                        }
+
+                        let signature_bytes = hex::decode(&response_signature)?;
+
+                        let g1: ark_bn254::g1::G1Affine =
+                            ark_bn254::g1::G1Affine::deserialize_uncompressed(
+                                &signature_bytes[..],
+                            )?;
+
+                        let mut task_response_buffer = vec![0u8; 30];
+                        let finish_reason_bytes = finish_reason.to_be_bytes();
+                        task_response_buffer.extend_from_slice(&finish_reason_bytes);
+                        task_response_buffer.extend_from_slice(&[0u8; 12]);
+
+                        task_response_buffer.extend_from_slice(&hex::decode(&ruleset)?);
+                        task_response_buffer.extend_from_slice(&issued_task.machineHash.to_vec());
+                        let mut hasher = Keccak256::new();
+                        hasher.update(&issued_task.input.clone());
+                        let payload_keccak = hasher.finalize();
+
+                        task_response_buffer.extend_from_slice(&payload_keccak.to_vec());
+                        task_response_buffer.extend_from_slice(&finish_result);
+                        let task_response_digest = keccak256(&task_response_buffer);
+
+                        let signature = TaskSignature::new(
+                            id as u32,
+                            task_response_digest,
+                            Signature::new(g1),
+                            operator_id.into(),
+                        );
+
+                        let processed_sig = handle.process_signature(signature).await;
+                        if processed_sig.is_ok() {
+                            println!("signature from operator {:?} processed", operator_id);
+                            response_digest_map.insert(
+                                B256::from_slice(task_response_digest.as_slice()),
+                                (finish_reason, finish_result, outputs_vector.clone()),
+                            );
+                        } else {
+                            println!(
+                            "signature from operator {:?} not processed get classic, error {:?}",
+                            operator_id,
+                            processed_sig.err().unwrap()
+                        );
+                        }
+                    }
+                }
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "No socket for operator_id {:?}",
+                        hex::encode(operator_id)
+                    ));
+                }
+            }
+        }
+        // Removes issued task after it was handled for all operators
+        match ids_issued_tasks.remove(&id) {
+            Some(task_issued) => {
+                handled_ids_and_issued_tasks.insert(id, task_issued);
+            }
+            None => {
+                return Err(anyhow::anyhow!(
+                    "No issued task was found for id = {:?}",
+                    id
+                ));
+            }
+        }
+    }
+
+    while !handled_ids_and_issued_tasks.is_empty() {
+        let bls_agg_response = aggregator_response
+            .receive_aggregated_response()
+            .await
+            .unwrap();
+
+        let id = bls_agg_response.task_index as i32;
+
+        let task_issued = handled_ids_and_issued_tasks.remove(&id).unwrap();
+
+        println!(
+            "agg_response_to_non_signer_stakes_and_signature {:?} current id {:?}, current task {:?}",
+            bls_agg_response, id, task_issued
+        );
+
+        handle_bls_agg_response(
+            &Ok((bls_agg_response.clone(), response_digest_map.clone())),
+            secret_key.clone(),
+            l1_http_endpoint.clone(),
+            task_issuer,
+            quorum_nums.clone(),
+            current_block_num,
+            ruleset.clone(),
+            &task_issued,
+            &pool,
+            &id,
+        )
+        .await;
+    }
+    Ok(())
 }
 
 async fn handle_task_issued_operator(
@@ -2178,7 +2507,7 @@ fn new_task_issued_handler_l1(
                                 )
                                 .await;
 
-                                handle_bls_agg_response(bls_agg_response, secret_key.clone(), l1_http_endpoint.clone(), task_issuer, quorum_nums, current_block_number, ruleset.clone(), task_issued, &pool, id).await;
+                                handle_bls_agg_response(&bls_agg_response, secret_key.clone(), l1_http_endpoint.clone(), task_issuer, quorum_nums, current_block_number, ruleset.clone(), &task_issued, &pool, &id).await;
                             }
                             Err(e) => println!(
                                 "no operators found at block {:?}. Error {:?}",
