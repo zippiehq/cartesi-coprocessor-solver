@@ -44,7 +44,7 @@ echo "Creating a bucket..."
 storage_output=$(fly storage create -n cartesi-data-$environment -a "$app_name" -o "$organization" | grep ':')
 echo $storage_output
 
-AWS_ENDPOINT_URL_S3=$(echo "$storage_output" | grep 'AWS_ENDPOINT_URL_S3' | cut -d':' -f2 | tr -d ' ')
+AWS_ENDPOINT_URL_S3="https://t3.storage.dev"
 AWS_ACCESS_KEY_ID=$(echo "$storage_output" | grep 'AWS_ACCESS_KEY_ID' | cut -d':' -f2 | tr -d ' ')
 AWS_SECRET_ACCESS_KEY=$(echo "$storage_output" | grep 'AWS_SECRET_ACCESS_KEY' | cut -d':' -f2 | tr -d ' ')
 BUCKET_NAME=$(echo "$storage_output" | grep 'BUCKET_NAME' | cut -d':' -f2 | tr -d ' ')
