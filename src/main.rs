@@ -2885,7 +2885,6 @@ fn subscribe_task_issued(
 ) {
     task::spawn({
         async move {
-            let client = pool.get().await.unwrap();
             log::info!("Started TaskIssued subscription");
 
             let ws_connect = alloy_provider::WsConnect::new(ws_endpoint);
@@ -2939,6 +2938,7 @@ fn subscribe_task_issued(
                                 log::info!("Failed to fetch balance: {:?}", err);
                             }
                         }
+                        let client = pool.get().await.unwrap();
 
                         match client
                                         .execute(
