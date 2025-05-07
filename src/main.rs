@@ -133,7 +133,7 @@ async fn log_and_return(
         .unwrap_or("-");
 
     let log_message = format!(
-        "{} - - \"{}{}{}\" {} {}",
+        "{} - - \"{} {} {}\" {} {}",
         remote_addr.ip(),
         method,
         path,
