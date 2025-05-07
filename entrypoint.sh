@@ -1,6 +1,10 @@
 #!/bin/bash
 
 CONFIG_FILE="/cartesi-coprocessor-solver/config.toml"
+ 
+if [ -z "$RUST_LOG" ]; then
+	export RUST_LOG=info
+fi
 
 if [ -n "$FLY_MACHINE_ID" ]; then
 	if [ -e /run/secrets/config.toml.$FLY_MACHINE_ID ]; then
