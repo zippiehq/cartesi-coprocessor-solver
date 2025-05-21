@@ -1379,7 +1379,6 @@ async fn main() {
         )
         .await;
     } else {
-        //Subscriber which inserts new tasks into the DB
         subscribe_task_issued(
             config.l1_ws_endpoint.clone(),
             config.l1_http_endpoint.clone(),
@@ -1390,22 +1389,22 @@ async fn main() {
             config.payment_phrase.clone(),
         );
 
-        //Subscriber which handles new tasks received from DB
-        new_task_issued_handler_l1(
+        monitor_issued_tasks(
+            pool.clone(),
+            config.postgre_connect_request.clone(),
             config.l1_ws_endpoint.clone(),
-            config.l1_http_endpoint.clone(),
             avs_registry_service.clone(),
-            sockets_map.clone(),
+            config.l1_http_endpoint.clone(),
+            config.l2_http_endpoint,
+            config.secret_key.clone(),
+            Address::from_str(&config.l2_coprocessor_address).unwrap(),
             config.socket.clone(),
             config.ruleset.clone(),
             config.max_ops,
             current_block_num,
-            config.secret_key.clone(),
+            sockets_map.clone(),
             config.task_issuer,
-            pool.clone(),
-            config.postgre_connect_request.clone(),
         );
-        log::info!("listening on l1");
     }
 
     subscribe_operator_socket_update(
@@ -1413,23 +1412,6 @@ async fn main() {
         sockets_map.clone(),
         config.registry_coordinator_address,
         current_last_block.clone(),
-    );
-
-    monitor_issued_tasks(
-        pool.clone(),
-        config.postgre_connect_request.clone(),
-        config.l1_ws_endpoint.clone(),
-        avs_registry_service.clone(),
-        config.l1_http_endpoint.clone(),
-        config.l2_http_endpoint,
-        config.secret_key.clone(),
-        Address::from_str(&config.l2_coprocessor_address).unwrap(),
-        config.socket.clone(),
-        config.ruleset.clone(),
-        config.max_ops,
-        current_block_num,
-        sockets_map.clone(),
-        config.task_issuer,
     );
 
     server.await.unwrap();
