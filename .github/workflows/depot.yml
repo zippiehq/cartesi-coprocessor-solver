@@ -32,7 +32,7 @@ jobs:
               uses: docker/metadata-action@v5
               with:
                 images: |
-                    ghcr.io/zippiehq/cartesi-coprocessor-solver
+                    ghcr.io/${{ github.repository_owner }}/coprocessor-solver
                 tags: |
                       type=semver,pattern={{version}}
                       type=ref,event=pr
@@ -40,8 +40,8 @@ jobs:
                       type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
 
                 labels: |
-                        org.opencontainers.image.title=Cartesi Coprocessor Solver
-                        org.opencontainers.image.description=Cartesi Coprocessor Solver
+                        org.opencontainers.image.title=Coprocessor Solver
+                        org.opencontainers.image.description=Coprocessor Solver
             
             - name : Set up Docker Buildx
               uses: docker/setup-buildx-action@v3
@@ -55,14 +55,11 @@ jobs:
             
             - name: Setup Depot ClI
               uses: depot/setup-action@v1
-              env:
-                    DEPOT_TOKEN: ${{ secrets.DEPOT_API_TOKEN }}
-
+              
             - name: Build and push (depot)
               uses: depot/bake-action@v1
               with:
-                    project: hs0gfs4l0l
-                    token: ${{ secrets.DEPOT_API_TOKEN }}
+                    project: ${{ vars.DEPOT_PROJECT }}
                     files: |
                         ./docker-bake.hcl
                         ./docker-bake.platforms.hcl
@@ -79,7 +76,7 @@ jobs:
               uses: actions/checkout@v4
               with:
                 submodules: recursive
-                repository: "zippiehq/cartesi-coprocessor"
+                repository: "${{ github.repository_owner }}/coprocessor"
 
             - name: Set up Docker compose
               uses: docker/setup-buildx-action@v3
